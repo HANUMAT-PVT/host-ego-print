@@ -20,7 +20,7 @@ app.commandLine.appendSwitch("disable-features", "GpuDiskCache");
 
 let mainWindow;
 
-/** Get printer list. Uses getPrintersAsync (Electron 26+) or getPrinters (older). */
+/** Get printer list. Uses getPrintersAsync (Electron 26+) or getPrinters (Electron 22 and older). */
 async function getPrintersList(webContents) {
     if (!webContents) return [];
     try {

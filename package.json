@@ -8,7 +8,8 @@
     "start": "electron .",
     "clean": "node scripts/clean-dist.js",
     "prebuild": "node scripts/clean-dist.js",
-    "build": "electron-builder"
+    "build": "electron-builder",
+    "build:win": "node scripts/clean-dist.js && electron-builder --win --x64"
   },
   "keywords": [],
   "author": "",
@@ -17,8 +18,10 @@
   "build": {
     "appId": "com.hostego.print",
     "productName": "Hostego Print",
+    "asar": true,
     "mac": {
-      "icon": "assets/icon.icns"
+      "icon": "assets/icon.icns",
+      "target": ["dmg", "zip"]
     },
     "win": {
       "target": "nsis",
@@ -29,7 +32,7 @@
     }
   },
   "devDependencies": {
-    "electron": "^40.0.0",
+    "electron": "22.3.27",
     "electron-builder": "^26.4.0"
   }
 }
