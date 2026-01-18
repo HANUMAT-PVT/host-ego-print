@@ -6,12 +6,11 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "electron .",
+    "clean": "node scripts/clean-dist.js",
+    "prebuild": "node scripts/clean-dist.js",
     "build": "electron-builder"
   },
-  "win": {
-    "target": "nsis",
-    "icon": "assets/favicon.ico"
-  },  "keywords": [],
+  "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
@@ -22,6 +21,7 @@
       "icon": "assets/icon.icns"
     },
     "win": {
+      "target": "nsis",
       "icon": "assets/favicon.ico"
     },
     "linux": {
