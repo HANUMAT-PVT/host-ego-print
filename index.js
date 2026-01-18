@@ -1,5 +1,22 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
+const fs = require("fs");
+
+// Mitigate Windows "Access is denied" cache errors: use a userData path with write access
+if (process.platform === "win32") {
+    const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || "", "AppData", "Roaming");
+    const userDataPath = path.join(appData, "HostegoPrint");
+    try {
+        if (!fs.existsSync(userDataPath)) fs.mkdirSync(userDataPath, { recursive: true });
+        app.setPath("userData", userDataPath);
+    } catch (e) {
+        console.warn("Could not set userData path:", e.message);
+    }
+    app.commandLine.appendSwitch("disk-cache-size", "0");
+}
+// Reduce disk cache / GPU cache errors (all platforms)
+app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+app.commandLine.appendSwitch("disable-features", "GpuDiskCache");
 
 let mainWindow;
 
@@ -37,18 +54,30 @@ function createWindow() {
     }
 }
 
-ipcMain.on("PRINT_JOB", async (event, job) => {
+ipcMain.handle("GET_PRINTERS", async () => {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+        return mainWindow.webContents.getPrinters();
+    }
+    return [];
+});
+
+ipcMain.handle("PRINT_JOB", async (_event, job) => {
     try {
         await printImages(job);
-        event.reply("PRINT_JOB_RESPONSE", { success: true, message: "Print job completed successfully" });
+        return { success: true, message: "Print job completed successfully" };
     } catch (err) {
         console.error("Print failed", err);
-        event.reply("PRINT_JOB_RESPONSE", { success: false, error: err.message });
+        return { success: false, error: err.message };
     }
 });
 
 async function printImages(job) {
     const { images_urls, quantity, color_mode } = job;
+    const deviceName = job.deviceName || job.printerName;
+
+    if (!images_urls || !Array.isArray(images_urls) || images_urls.length === 0) {
+        throw new Error("images_urls is required and must be a non-empty array.");
+    }
 
     const printWindow = new BrowserWindow({
         show: false, // VERY IMPORTANT
@@ -101,32 +130,49 @@ async function printImages(job) {
     return new Promise((resolve, reject) => {
         printWindow.webContents.on("did-finish-load", async () => {
             try {
-                // Check if any printers are available
                 const printers = await printWindow.webContents.getPrinters();
-
                 if (printers.length === 0) {
                     printWindow.close();
                     throw new Error("No printers found. Please connect a printer and try again.");
                 }
-
-                for (let i = 0; i < quantity; i++) {
-                    await new Promise((resolve, reject) => {
-                        printWindow.webContents.print(
-                            {
-                                silent: true,
-                                printBackground: true,
-                                color: color_mode === "color",
-                            },
-                            (success, failureReason) => {
-                                if (success) {
-                                    resolve();
-                                } else {
-                                    reject(new Error(failureReason || "Print failed"));
-                                }
-                            }
-                        );
-                    });
+                if (deviceName) {
+                    const found = printers.some((p) => p.name === deviceName);
+                    if (!found) {
+                        printWindow.close();
+                        throw new Error(`Printer "${deviceName}" not found. Please select another or refresh.`);
+                    }
                 }
+
+                // Wait for images to load before printing
+                await printWindow.webContents.executeJavaScript(`
+                    (function(){
+                        return new Promise(function(resolve){
+                            var imgs = document.images;
+                            if (imgs.length === 0) return resolve();
+                            var left = imgs.length;
+                            function done(){ if (--left === 0) resolve(); }
+                            for (var i = 0; i < imgs.length; i++) {
+                                if (imgs[i].complete) done();
+                                else { imgs[i].onload = done; imgs[i].onerror = done; }
+                            }
+                        });
+                    })();
+                `);
+
+                const printOpts = {
+                    silent: true,
+                    printBackground: true,
+                    color: color_mode === "color",
+                    copies: Math.max(1, parseInt(quantity, 10) || 1),
+                };
+                if (deviceName) printOpts.deviceName = deviceName;
+
+                await new Promise((resolvePrint, rejectPrint) => {
+                    printWindow.webContents.print(printOpts, (success, failureReason) => {
+                        if (success) resolvePrint();
+                        else rejectPrint(new Error(failureReason || "Print failed"));
+                    });
+                });
 
                 printWindow.close();
                 resolve();
