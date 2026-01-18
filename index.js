@@ -20,6 +20,22 @@ app.commandLine.appendSwitch("disable-features", "GpuDiskCache");
 
 let mainWindow;
 
+/** Get printer list. Uses getPrintersAsync (Electron 26+) or getPrinters (older). */
+async function getPrintersList(webContents) {
+    if (!webContents) return [];
+    try {
+        if (typeof webContents.getPrintersAsync === "function") {
+            return await webContents.getPrintersAsync();
+        }
+        if (typeof webContents.getPrinters === "function") {
+            return webContents.getPrinters();
+        }
+    } catch (e) {
+        console.warn("getPrinters failed:", e?.message || e);
+    }
+    return [];
+}
+
 function createWindow() {
     // Determine icon path based on platform
     let iconPath;
@@ -56,7 +72,7 @@ function createWindow() {
 
 ipcMain.handle("GET_PRINTERS", async () => {
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
-        return mainWindow.webContents.getPrinters();
+        return getPrintersList(mainWindow.webContents);
     }
     return [];
 });
@@ -130,7 +146,7 @@ async function printImages(job) {
     return new Promise((resolve, reject) => {
         printWindow.webContents.on("did-finish-load", async () => {
             try {
-                const printers = await printWindow.webContents.getPrinters();
+                const printers = await getPrintersList(printWindow.webContents);
                 if (printers.length === 0) {
                     printWindow.close();
                     throw new Error("No printers found. Please connect a printer and try again.");
