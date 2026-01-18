@@ -95,8 +95,14 @@ async function printImages(job) {
         throw new Error("images_urls is required and must be a non-empty array.");
     }
 
+    // Must have size and be "shown" (can be off-screen) so the print engine renders. Purely hidden
+    // windows can cause print to hang or the callback to never fire on some OS/drivers.
     const printWindow = new BrowserWindow({
-        show: false, // VERY IMPORTANT
+        show: true,
+        x: -10000,
+        y: -10000,
+        width: 794,
+        height: 1123,
         webPreferences: {
             sandbox: false,
         },
@@ -139,64 +145,87 @@ async function printImages(job) {
     </html>
   `;
 
+    // For data: URLs, did-finish-load may never fire. Resolve on first of dom-ready or did-finish-load.
+    const readyPromise = new Promise((r) => {
+        const done = () => r();
+        printWindow.webContents.once("dom-ready", done);
+        printWindow.webContents.once("did-finish-load", done);
+    });
     await printWindow.loadURL(
         "data:text/html;charset=utf-8," + encodeURIComponent(html)
     );
 
     return new Promise((resolve, reject) => {
-        printWindow.webContents.on("did-finish-load", async () => {
+        (async () => {
             try {
+                await Promise.race([
+                    readyPromise,
+                    new Promise((_, rej) => setTimeout(() => rej(new Error("Print preparation timed out. Please try again.")), 10000)),
+                ]);
                 const printers = await getPrintersList(printWindow.webContents);
                 if (printers.length === 0) {
                     printWindow.close();
                     throw new Error("No printers found. Please connect a printer and try again.");
                 }
-                if (deviceName) {
-                    const found = printers.some((p) => p.name === deviceName);
+                let targetDevice = deviceName;
+                if (!targetDevice) {
+                    const def = printers.find((p) => p.isDefault) || printers[0];
+                    targetDevice = def ? def.name : null;
+                } else {
+                    const found = printers.some((p) => p.name === targetDevice);
                     if (!found) {
                         printWindow.close();
-                        throw new Error(`Printer "${deviceName}" not found. Please select another or refresh.`);
+                        throw new Error(`Printer "${targetDevice}" not found. Please select another or refresh.`);
                     }
                 }
 
-                // Wait for images to load before printing
-                await printWindow.webContents.executeJavaScript(`
-                    (function(){
-                        return new Promise(function(resolve){
-                            var imgs = document.images;
-                            if (imgs.length === 0) return resolve();
-                            var left = imgs.length;
-                            function done(){ if (--left === 0) resolve(); }
-                            for (var i = 0; i < imgs.length; i++) {
-                                if (imgs[i].complete) done();
-                                else { imgs[i].onload = done; imgs[i].onerror = done; }
-                            }
-                        });
-                    })();
-                `);
-
-                const printOpts = {
-                    silent: true,
-                    printBackground: true,
-                    color: color_mode === "color",
-                    copies: Math.max(1, parseInt(quantity, 10) || 1),
-                };
-                if (deviceName) printOpts.deviceName = deviceName;
-
-                await new Promise((resolvePrint, rejectPrint) => {
-                    printWindow.webContents.print(printOpts, (success, failureReason) => {
-                        if (success) resolvePrint();
-                        else rejectPrint(new Error(failureReason || "Print failed"));
+                // Wait for images to load (max 15s) so we never hang on slow/broken URLs
+            const waitImages = printWindow.webContents.executeJavaScript(`
+                (function(){
+                    return new Promise(function(resolve){
+                        var imgs = document.images;
+                        if (imgs.length === 0) return resolve();
+                        var left = imgs.length;
+                        function done(){ if (--left === 0) resolve(); }
+                        for (var i = 0; i < imgs.length; i++) {
+                            if (imgs[i].complete) done();
+                            else { imgs[i].onload = done; imgs[i].onerror = done; }
+                        }
                     });
-                });
+                })();
+            `);
+            await Promise.race([waitImages, new Promise((r) => setTimeout(r, 15000))]);
 
-                printWindow.close();
-                resolve();
+            // Give the compositor a moment to paint before printing
+            await new Promise((r) => setTimeout(r, 500));
+
+            // Do not pass pageSize: Electron may not support string "A4" and it can prevent the print callback from firing. @page { size: A4 } in CSS is enough.
+            const printOpts = {
+                silent: true,
+                printBackground: true,
+                color: color_mode === "color",
+                copies: Math.max(1, parseInt(quantity, 10) || 1),
+            };
+            if (targetDevice) printOpts.deviceName = targetDevice;
+
+            const printDone = new Promise((resolvePrint, rejectPrint) => {
+                printWindow.webContents.print(printOpts, (success, failureReason) => {
+                    if (success) resolvePrint();
+                    else rejectPrint(new Error(failureReason || "Print failed"));
+                });
+            });
+            await Promise.race([
+                printDone,
+                new Promise((_, rej) => setTimeout(() => rej(new Error("Print timed out. Check that the printer is on and connected.")), 30000)),
+            ]);
+
+            printWindow.close();
+            resolve();
             } catch (error) {
                 printWindow.close();
                 reject(error);
             }
-        });
+        })();
     });
 }
 
