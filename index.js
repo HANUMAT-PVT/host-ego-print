@@ -90,20 +90,7 @@ function isPdf(job, url, index) {
     return isPdfUrl(url);
 }
 
-/** Build HTML for printing a single image that fills the page */
-function buildPrintImageHtml(imageDataUrl) {
-    return `<!DOCTYPE html><html><head><style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        @page { size: A4; margin: 0; }
-        html, body { width: 100%; height: 100%; margin: 0; padding: 0; background: white; }
-        img { 
-            width: 100%; 
-            height: 100vh; 
-            object-fit: contain;
-            display: block;
-        }
-    </style></head><body><img src="${imageDataUrl}" /></body></html>`;
-}
+
 
 /** Build HTML for images */
 function buildImageHtml(urls) {
@@ -275,7 +262,7 @@ async function printJob(job) {
                 if (isPdf(job, url, i)) {
                     // 🎯 PDF: Use PDF.js in browser to render to canvas, then print
                     console.log("Rendering PDF with PDF.js:", url);
-                    
+
                     const loadPromise = new Promise((resolve) => {
                         printWindow.webContents.once("did-finish-load", resolve);
                     });
@@ -309,7 +296,7 @@ async function printJob(job) {
                             check();
                         });
                     `);
-                    
+
                     // Extra wait for canvas rendering to complete
                     await new Promise((r) => setTimeout(r, 1000));
 
@@ -319,15 +306,26 @@ async function printJob(job) {
                         printBackground: true,
                         color: isColor,
                         copies: 1,
-                        margins: { marginType: "none" },
-                        pageSize: "A4",
+                        deviceName: targetPrinter,
+
+                        margins: {
+                            marginType: "none",
+                        },
+
+                        pageSize: {
+                            width: 210000,   // microns
+                            height: 297000,
+                        },
+
+                        scaleFactor: 100,
                     };
+
                     if (targetPrinter) printOpts.deviceName = targetPrinter;
 
                     console.log("Printing PDF...");
                     await doPrint(printWindow.webContents, printOpts);
                     console.log("PDF printed successfully");
-                    
+
                 } else {
                     // Regular image printing
                     const loadPromise = new Promise((resolve) => {
