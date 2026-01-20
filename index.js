@@ -162,18 +162,23 @@ async function printImages(job) {
     const isColor = String(color_mode || "color").toLowerCase() === "color";
     const allImages = urls.every((u, i) => !isPdf(job, u, i));
 
-    // Must have size and be "shown" (can be off-screen) so the print engine renders. Purely hidden
-    // windows can cause print to hang or the callback to never fire on some OS/drivers.
-    // backgroundThrottling: false so PDFs and images keep rendering fully when off-screen.
+    // Print window must be "shown" and have proper size for rendering. Off-screen (x: -10000) can cause
+    // black/blank pages for PDFs due to GPU issues. Position at (0,0) with no frame, not in taskbar.
+    // hardwareAcceleration: false uses CPU rendering to avoid GPU black-screen bugs.
     const printWindow = new BrowserWindow({
         show: true,
-        x: -10000,
-        y: -10000,
+        x: 0,
+        y: 0,
         width: 794,
         height: 1123,
+        frame: false,
+        skipTaskbar: true,
+        alwaysOnTop: false,
         webPreferences: {
             sandbox: false,
             backgroundThrottling: false,
+            offscreen: false,
+            hardwareAcceleration: false,
         },
     });
 
@@ -299,8 +304,14 @@ async function printImages(job) {
             }
 
             if (isPdf(job, url, i)) {
-                // PDF viewer must finish laying out all pages before print; otherwise blank pages.
+                // PDF viewer must finish laying out all pages before print; otherwise blank/black pages.
                 await new Promise((r) => setTimeout(r, 5500));
+                // Force a layout/paint cycle to ensure PDF is fully rendered
+                try {
+                    await printWindow.webContents.executeJavaScript('document.body ? document.body.offsetHeight : 0');
+                } catch (e) {
+                    // PDF viewer might not have standard DOM, ignore errors
+                }
             } else {
                 const waitImages = printWindow.webContents.executeJavaScript(`
                     (function(){
