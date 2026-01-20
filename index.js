@@ -92,6 +92,31 @@ function isPdfUrl(url) {
     return /\.pdf($|[?#])/i.test(String(url || ""));
 }
 
+/** True if the item at index is a PDF. Uses job.file_types when provided (matches Printego Partner file_type), else isPdfUrl. */
+function isPdf(job, url, index) {
+    const ft = job.file_types && Array.isArray(job.file_types) ? String(job.file_types[index] || "").toLowerCase() : "";
+    if (ft && (ft === "pdf" || ft === "application/pdf" || ft.includes("pdf"))) return true;
+    if (ft && !ft.includes("pdf")) return false;
+    return isPdfUrl(url);
+}
+
+/** Escape string for safe use inside an HTML attribute. */
+function escapeHtmlAttr(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+/** Build HTML that embeds a PDF via <embed>. Works better in Electron than loadURL(pdfUrl) for display and print. */
+function buildPdfHtml(url) {
+    const esc = escapeHtmlAttr(url);
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+        *{margin:0;padding:0;box-sizing:border-box;}
+        html,body{width:100%;height:100%;overflow:hidden;}
+        @page{size:A4;margin:0;}
+        @media print{body{margin:0;padding:0;}}
+        embed{display:block;width:100%;height:100%;border:0;}
+    </style></head><body><embed src="${esc}" type="application/pdf" /></body></html>`;
+}
+
 /** Build HTML to display one or more image URLs (one per page). */
 function buildImageHtml(urls) {
     const body = urls
@@ -134,10 +159,12 @@ async function printImages(job) {
 
     const urls = images_urls;
     const qty = Math.max(1, parseInt(quantity, 10) || 1);
-    const allImages = urls.every((u) => !isPdfUrl(u));
+    const isColor = String(color_mode || "color").toLowerCase() === "color";
+    const allImages = urls.every((u, i) => !isPdf(job, u, i));
 
     // Must have size and be "shown" (can be off-screen) so the print engine renders. Purely hidden
     // windows can cause print to hang or the callback to never fire on some OS/drivers.
+    // backgroundThrottling: false so PDFs and images keep rendering fully when off-screen.
     const printWindow = new BrowserWindow({
         show: true,
         x: -10000,
@@ -146,6 +173,7 @@ async function printImages(job) {
         height: 1123,
         webPreferences: {
             sandbox: false,
+            backgroundThrottling: false,
         },
     });
 
@@ -211,12 +239,10 @@ async function printImages(job) {
                     const printOpts = {
                         silent: true,
                         printBackground: true,
-                        color: color_mode === "color",
+                        color: isColor,
                         copies: qty,
-                        margins: {
-                            marginType: 'none'
-                        },
-                        pageSize: 'A4',
+                        margins: { marginType: "none" },
+                        pageSize: "A4",
                     };
                     if (targetDevice) printOpts.deviceName = targetDevice;
 
@@ -246,11 +272,12 @@ async function printImages(job) {
                 printWindow.webContents.once("did-finish-load", done);
             });
 
-            if (isPdfUrl(url)) {
-                await printWindow.loadURL(url);
+            if (isPdf(job, url, i)) {
+                const pdfHtml = buildPdfHtml(url);
+                await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(pdfHtml));
                 await Promise.race([
                     readyPromise,
-                    new Promise((_, rej) => setTimeout(() => rej(new Error("PDF load timed out. Please try again.")), 15000)),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error("PDF load timed out. Please try again.")), 20000)),
                 ]);
             } else {
                 const html = buildImageHtml([url]);
@@ -270,8 +297,9 @@ async function printImages(job) {
                 }
             }
 
-            if (isPdfUrl(url)) {
-                await new Promise((r) => setTimeout(r, 800));
+            if (isPdf(job, url, i)) {
+                // PDF viewer needs time to render all pages; too short causes white/blank pages when printing.
+                await new Promise((r) => setTimeout(r, 3500));
             } else {
                 const waitImages = printWindow.webContents.executeJavaScript(`
                     (function(){
@@ -294,12 +322,10 @@ async function printImages(job) {
             const printOpts = {
                 silent: true,
                 printBackground: true,
-                color: color_mode === "color",
+                color: isColor,
                 copies: 1,
-                margins: {
-                    marginType: 'none'
-                },
-                pageSize: 'A4',
+                margins: { marginType: "none" },
+                pageSize: "A4",
             };
             if (targetDevice) printOpts.deviceName = targetDevice;
 
