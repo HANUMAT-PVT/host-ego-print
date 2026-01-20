@@ -1,8 +1,11 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
+const pdfjsLib = require("pdfjs-dist");
 const { createCanvas } = require("canvas");
+
+// Configure pdfjs-dist to disable worker (Node.js environment)
+pdfjsLib.GlobalWorkerOptions.workerSrc = null;
 
 // Mitigate Windows "Access is denied" cache errors: use a userData path with write access
 if (process.platform === "win32") {
