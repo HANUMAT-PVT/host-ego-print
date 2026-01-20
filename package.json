@@ -42,6 +42,6 @@
   },
   "dependencies": {
     "canvas": "^3.2.1",
-    "pdfjs-dist": "^5.4.530"
+    "pdfjs-dist": "^3.11.174"
   }
 }
