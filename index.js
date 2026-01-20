@@ -128,80 +128,93 @@ function buildImageHtml(urls) {
 }
 
 /**
- * Capture PDF pages as images using Electron's capturePage
- * This is the key fix - we screenshot the PDF and print the screenshot
+ * Create HTML that renders PDF using PDF.js in browser (client-side rendering)
+ * This renders the PDF to canvas in the browser, avoiding GPU issues
  */
-async function capturePdfAsImages(pdfUrl) {
-    const images = [];
-    
-    // Create a window to render the PDF - MUST be visible for proper rendering
-    const pdfWindow = new BrowserWindow({
-        show: true,  // Must be visible!
-        x: -2000,    // Off-screen but still rendered
-        y: -2000,
-        width: 794,  // A4 width at 96 DPI
-        height: 1123, // A4 height at 96 DPI
-        webPreferences: {
-            sandbox: false,
-        },
-    });
-
-    try {
-        // Load the PDF
-        await pdfWindow.loadURL(pdfUrl);
+function buildPdfRenderHtml(pdfUrl) {
+    return `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        @page { size: A4; margin: 0; }
+        @media print { 
+            .page { page-break-after: always; }
+            .page:last-child { page-break-after: auto; }
+        }
+        html, body { background: white; }
+        .page { 
+            width: 210mm; 
+            min-height: 297mm;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: white;
+        }
+        canvas { 
+            max-width: 100%; 
+            max-height: 297mm;
+        }
+        #loading { 
+            position: fixed; 
+            top: 50%; 
+            left: 50%; 
+            transform: translate(-50%, -50%);
+            font-family: Arial, sans-serif;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Loading PDF...</div>
+    <div id="pages"></div>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
         
-        // Wait for PDF to fully render
-        await new Promise(r => setTimeout(r, 4000));
-
-        // Get total pages using PDF.js viewer's internal API
-        let totalPages = 1;
-        try {
-            totalPages = await pdfWindow.webContents.executeJavaScript(`
-                (function() {
-                    // Try to get page count from Chromium's PDF viewer
-                    const viewer = document.querySelector('embed[type="application/pdf"]');
-                    if (viewer && viewer.postMessage) {
-                        return 1; // Can't easily get page count, assume 1 for now
-                    }
-                    // Check if PDFViewerApplication exists (Firefox-style viewer)
-                    if (typeof PDFViewerApplication !== 'undefined' && PDFViewerApplication.pdfDocument) {
-                        return PDFViewerApplication.pdfDocument.numPages;
-                    }
-                    return 1;
-                })();
-            `);
-        } catch (e) {
-            totalPages = 1;
-        }
-
-        // Capture each page
-        for (let page = 1; page <= totalPages; page++) {
-            // Navigate to page if multi-page (for Chromium PDF viewer)
-            if (page > 1) {
-                try {
-                    await pdfWindow.webContents.executeJavaScript(`
-                        if (typeof PDFViewerApplication !== 'undefined') {
-                            PDFViewerApplication.page = ${page};
-                        }
-                    `);
-                    await new Promise(r => setTimeout(r, 1000));
-                } catch (e) {}
+        async function renderPDF() {
+            try {
+                const pdf = await pdfjsLib.getDocument('${pdfUrl}').promise;
+                document.getElementById('loading').style.display = 'none';
+                
+                const container = document.getElementById('pages');
+                
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    const scale = 2; // High quality
+                    const viewport = page.getViewport({ scale });
+                    
+                    const canvas = document.createElement('canvas');
+                    const context = canvas.getContext('2d');
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+                    
+                    await page.render({
+                        canvasContext: context,
+                        viewport: viewport
+                    }).promise;
+                    
+                    const pageDiv = document.createElement('div');
+                    pageDiv.className = 'page';
+                    pageDiv.appendChild(canvas);
+                    container.appendChild(pageDiv);
+                }
+                
+                // Signal that rendering is complete
+                window.pdfRendered = true;
+                console.log('PDF rendered:', pdf.numPages, 'pages');
+            } catch (error) {
+                document.getElementById('loading').textContent = 'Error: ' + error.message;
+                console.error('PDF render error:', error);
+                window.pdfError = error.message;
             }
-
-            // Capture the page as an image
-            const image = await pdfWindow.webContents.capturePage();
-            const pngBuffer = image.toPNG();
-            
-            // Save to temp file
-            const tempPath = path.join(app.getPath("temp"), `pdf_page_${Date.now()}_${page}.png`);
-            fs.writeFileSync(tempPath, pngBuffer);
-            images.push(tempPath);
         }
-    } finally {
-        pdfWindow.close();
-    }
-
-    return images;
+        
+        renderPDF();
+    </script>
+</body>
+</html>`;
 }
 
 async function printJob(job) {
@@ -216,17 +229,20 @@ async function printJob(job) {
     const qty = Math.max(1, parseInt(quantity, 10) || 1);
     const isColor = String(color_mode || "color").toLowerCase() === "color";
 
-    // Create print window
+    // Create print window - visible for proper rendering
     const printWindow = new BrowserWindow({
-        show: false,
+        show: true,
+        x: 0,
+        y: 0,
         width: 794,
         height: 1123,
+        frame: false,
+        skipTaskbar: true,
         webPreferences: {
             sandbox: false,
+            webSecurity: false, // Allow loading PDF from any URL
         },
     });
-
-    const tempFiles = []; // Track temp files for cleanup
 
     async function getTargetPrinter() {
         const printers = await getPrintersList(printWindow.webContents);
@@ -257,53 +273,61 @@ async function printJob(job) {
                 const url = urls[i];
 
                 if (isPdf(job, url, i)) {
-                    // 🎯 PDF: Capture as image first, then print the image
-                    console.log("Converting PDF to image:", url);
-                    const pdfImages = await capturePdfAsImages(url);
-                    tempFiles.push(...pdfImages);
+                    // 🎯 PDF: Use PDF.js in browser to render to canvas, then print
+                    console.log("Rendering PDF with PDF.js:", url);
+                    
+                    const loadPromise = new Promise((resolve) => {
+                        printWindow.webContents.once("did-finish-load", resolve);
+                    });
 
-                    for (const imgPath of pdfImages) {
-                        const loadPromise = new Promise((resolve) => {
-                            printWindow.webContents.once("did-finish-load", resolve);
-                        });
+                    // Load HTML that uses PDF.js to render PDF to canvas
+                    const html = buildPdfRenderHtml(url);
+                    await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
 
-                        // Load the captured image
-                        const html = buildImageHtml([`file://${imgPath}`]);
-                        await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+                    await Promise.race([
+                        loadPromise,
+                        new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 30000)),
+                    ]);
 
-                        await Promise.race([
-                            loadPromise,
-                            new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 15000)),
-                        ]);
-
-                        // Wait for image to load
-                        await printWindow.webContents.executeJavaScript(`
-                            new Promise((resolve) => {
-                                const imgs = document.images;
-                                if (imgs.length === 0) return resolve();
-                                let left = imgs.length;
-                                const done = () => { if (--left === 0) resolve(); };
-                                for (let i = 0; i < imgs.length; i++) {
-                                    if (imgs[i].complete) done();
-                                    else { imgs[i].onload = done; imgs[i].onerror = done; }
+                    // Wait for PDF.js to finish rendering
+                    console.log("Waiting for PDF.js to render...");
+                    await printWindow.webContents.executeJavaScript(`
+                        new Promise((resolve, reject) => {
+                            let checks = 0;
+                            const check = () => {
+                                checks++;
+                                if (window.pdfRendered) {
+                                    resolve();
+                                } else if (window.pdfError) {
+                                    reject(new Error(window.pdfError));
+                                } else if (checks > 100) {
+                                    reject(new Error('PDF render timeout'));
+                                } else {
+                                    setTimeout(check, 200);
                                 }
-                            });
-                        `);
-                        await new Promise((r) => setTimeout(r, 300));
+                            };
+                            check();
+                        });
+                    `);
+                    
+                    // Extra wait for canvas rendering to complete
+                    await new Promise((r) => setTimeout(r, 1000));
 
-                        // Print
-                        const printOpts = {
-                            silent: true,
-                            printBackground: true,
-                            color: isColor,
-                            copies: 1,
-                            margins: { marginType: "none" },
-                            pageSize: "A4",
-                        };
-                        if (targetPrinter) printOpts.deviceName = targetPrinter;
+                    // Print
+                    const printOpts = {
+                        silent: true,
+                        printBackground: true,
+                        color: isColor,
+                        copies: 1,
+                        margins: { marginType: "none" },
+                        pageSize: "A4",
+                    };
+                    if (targetPrinter) printOpts.deviceName = targetPrinter;
 
-                        await doPrint(printWindow.webContents, printOpts);
-                    }
+                    console.log("Printing PDF...");
+                    await doPrint(printWindow.webContents, printOpts);
+                    console.log("PDF printed successfully");
+                    
                 } else {
                     // Regular image printing
                     const loadPromise = new Promise((resolve) => {
@@ -348,21 +372,8 @@ async function printJob(job) {
         }
 
         printWindow.close();
-
-        // Cleanup temp files
-        for (const tempFile of tempFiles) {
-            try {
-                if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
-            } catch (e) {}
-        }
     } catch (error) {
         printWindow.close();
-        // Cleanup temp files on error too
-        for (const tempFile of tempFiles) {
-            try {
-                if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
-            } catch (e) {}
-        }
         throw error;
     }
 }
