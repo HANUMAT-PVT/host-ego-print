@@ -41,7 +41,7 @@
     "png-to-ico": "^3.0.1"
   },
   "dependencies": {
-    "canvas": "^3.2.1",
-    "pdfjs-dist": "^3.11.174"
+    "canvas": "^2.11.2",
+    "pdfjs-dist": "^2.16.105"
   }
 }

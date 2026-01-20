@@ -1,8 +1,19 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
-const { createCanvas } = require("canvas");
+
+// PDF to image conversion - lazy loaded to avoid startup issues
+let pdfjsLib = null;
+let createCanvas = null;
+
+async function initPdfLibs() {
+    if (!pdfjsLib) {
+        pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
+    }
+    if (!createCanvas) {
+        createCanvas = require("canvas").createCanvas;
+    }
+}
 
 // Mitigate Windows "Access is denied" cache errors: use a userData path with write access
 if (process.platform === "win32") {
@@ -43,6 +54,9 @@ async function getPrintersList(webContents) {
  * Solves black/blank page issues by rasterizing PDFs before print.
  */
 async function pdfToImages(pdfUrl) {
+    // Initialize PDF libraries on first use
+    await initPdfLibs();
+
     const loadingTask = pdfjsLib.getDocument(pdfUrl);
     const pdf = await loadingTask.promise;
 
