@@ -39,5 +39,9 @@
     "electron": "22.3.27",
     "electron-builder": "^26.4.0",
     "png-to-ico": "^3.0.1"
+  },
+  "dependencies": {
+    "canvas": "^3.2.1",
+    "pdfjs-dist": "^5.4.530"
   }
 }

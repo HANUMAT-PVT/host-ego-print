@@ -1,6 +1,8 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
+const { createCanvas } = require("canvas");
 
 // Mitigate Windows "Access is denied" cache errors: use a userData path with write access
 if (process.platform === "win32") {
@@ -34,6 +36,42 @@ async function getPrintersList(webContents) {
         console.warn("getPrinters failed:", e?.message || e);
     }
     return [];
+}
+
+/**
+ * Convert PDF to high-quality PNG images for printing.
+ * Solves black/blank page issues by rasterizing PDFs before print.
+ */
+async function pdfToImages(pdfUrl) {
+    const loadingTask = pdfjsLib.getDocument(pdfUrl);
+    const pdf = await loadingTask.promise;
+
+    const images = [];
+
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+
+        // Scale 2 for high quality (300 DPI equivalent for A4)
+        const viewport = page.getViewport({ scale: 2 });
+        const canvas = createCanvas(viewport.width, viewport.height);
+        const context = canvas.getContext("2d");
+
+        await page.render({
+            canvasContext: context,
+            viewport,
+        }).promise;
+
+        const buffer = canvas.toBuffer("image/png");
+        const filePath = path.join(
+            app.getPath("temp"),
+            `print_page_${Date.now()}_${pageNum}.png`
+        );
+
+        fs.writeFileSync(filePath, buffer);
+        images.push(`file://${filePath}`);
+    }
+
+    return images;
 }
 
 function createWindow() {
@@ -268,51 +306,96 @@ async function printImages(job) {
 
     // --- Mixed or all PDFs: load each URL, detect PDF vs image, print one-by-one; repeat `qty` times for copies ---
     let targetDevice = null;
+    const tempFiles = []; // Track temp files for cleanup
+
     for (let q = 0; q < qty; q++) {
         for (let i = 0; i < urls.length; i++) {
             const url = urls[i];
-            const readyPromise = new Promise((r) => {
-                const done = () => r();
-                printWindow.webContents.once("dom-ready", done);
-                printWindow.webContents.once("did-finish-load", done);
-            });
 
             if (isPdf(job, url, i)) {
-                // Load PDF as main document (not embed). Printing an embed often yields blank pages;
-                // loading directly makes the PDF viewer the document, so print() captures it.
-                await printWindow.loadURL(url);
-                await Promise.race([
-                    readyPromise,
-                    new Promise((_, rej) => setTimeout(() => rej(new Error("PDF load timed out. Please try again.")), 25000)),
-                ]);
+                // 🎯 PDF → Images → Print (no black pages!)
+                const pdfImages = await pdfToImages(url);
+                tempFiles.push(...pdfImages);
+
+                for (const imgUrl of pdfImages) {
+                    const readyPromise = new Promise((r) => {
+                        const done = () => r();
+                        printWindow.webContents.once("dom-ready", done);
+                        printWindow.webContents.once("did-finish-load", done);
+                    });
+
+                    const html = buildImageHtml([imgUrl]);
+                    await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+                    await Promise.race([
+                        readyPromise,
+                        new Promise((_, rej) => setTimeout(() => rej(new Error("Print preparation timed out. Please try again.")), 10000)),
+                    ]);
+
+                    if (targetDevice === null) {
+                        try {
+                            targetDevice = await resolveTargetDevice(printWindow.webContents);
+                        } catch (e) {
+                            printWindow.close();
+                            throw e;
+                        }
+                    }
+
+                    const waitImages = printWindow.webContents.executeJavaScript(`
+                        (function(){
+                            return new Promise(function(resolve){
+                                var imgs = document.images;
+                                if (imgs.length === 0) return resolve();
+                                var left = imgs.length;
+                                function done(){ if (--left === 0) resolve(); }
+                                for (var i = 0; i < imgs.length; i++) {
+                                    if (imgs[i].complete) done();
+                                    else { imgs[i].onload = done; imgs[i].onerror = done; }
+                                }
+                            });
+                        })();
+                    `);
+                    await Promise.race([waitImages, new Promise((r) => setTimeout(r, 15000))]);
+                    await new Promise((r) => setTimeout(r, 500));
+
+                    const printOpts = {
+                        silent: true,
+                        printBackground: true,
+                        color: isColor,
+                        copies: 1,
+                        margins: { marginType: "none" },
+                        pageSize: "A4",
+                    };
+                    if (targetDevice) printOpts.deviceName = targetDevice;
+
+                    await Promise.race([
+                        doPrint(printWindow.webContents, printOpts),
+                        new Promise((_, rej) => setTimeout(() => rej(new Error("Print timed out. Check that the printer is on and connected.")), 30000)),
+                    ]);
+                }
             } else {
+                // Regular image printing
+                const readyPromise = new Promise((r) => {
+                    const done = () => r();
+                    printWindow.webContents.once("dom-ready", done);
+                    printWindow.webContents.once("did-finish-load", done);
+                });
+
                 const html = buildImageHtml([url]);
                 await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
                 await Promise.race([
                     readyPromise,
                     new Promise((_, rej) => setTimeout(() => rej(new Error("Print preparation timed out. Please try again.")), 10000)),
                 ]);
-            }
 
-            if (targetDevice === null) {
-                try {
-                    targetDevice = await resolveTargetDevice(printWindow.webContents);
-                } catch (e) {
-                    printWindow.close();
-                    throw e;
+                if (targetDevice === null) {
+                    try {
+                        targetDevice = await resolveTargetDevice(printWindow.webContents);
+                    } catch (e) {
+                        printWindow.close();
+                        throw e;
+                    }
                 }
-            }
 
-            if (isPdf(job, url, i)) {
-                // PDF viewer must finish laying out all pages before print; otherwise blank/black pages.
-                await new Promise((r) => setTimeout(r, 5500));
-                // Force a layout/paint cycle to ensure PDF is fully rendered
-                try {
-                    await printWindow.webContents.executeJavaScript('document.body ? document.body.offsetHeight : 0');
-                } catch (e) {
-                    // PDF viewer might not have standard DOM, ignore errors
-                }
-            } else {
                 const waitImages = printWindow.webContents.executeJavaScript(`
                     (function(){
                         return new Promise(function(resolve){
@@ -329,25 +412,38 @@ async function printImages(job) {
                 `);
                 await Promise.race([waitImages, new Promise((r) => setTimeout(r, 15000))]);
                 await new Promise((r) => setTimeout(r, 500));
+
+                const printOpts = {
+                    silent: true,
+                    printBackground: true,
+                    color: isColor,
+                    copies: 1,
+                    margins: { marginType: "none" },
+                    pageSize: "A4",
+                };
+                if (targetDevice) printOpts.deviceName = targetDevice;
+
+                await Promise.race([
+                    doPrint(printWindow.webContents, printOpts),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error("Print timed out. Check that the printer is on and connected.")), 30000)),
+                ]);
             }
-
-            const printOpts = {
-                silent: true,
-                printBackground: true,
-                color: isColor,
-                copies: 1,
-                margins: { marginType: "none" },
-                pageSize: "A4",
-            };
-            if (targetDevice) printOpts.deviceName = targetDevice;
-
-            await Promise.race([
-                doPrint(printWindow.webContents, printOpts),
-                new Promise((_, rej) => setTimeout(() => rej(new Error("Print timed out. Check that the printer is on and connected.")), 30000)),
-            ]);
         }
     }
+
     printWindow.close();
+
+    // Cleanup temp PDF images
+    tempFiles.forEach((filePath) => {
+        try {
+            const localPath = filePath.replace("file://", "");
+            if (fs.existsSync(localPath)) {
+                fs.unlinkSync(localPath);
+            }
+        } catch (e) {
+            console.warn("Cleanup failed for:", filePath, e.message);
+        }
+    });
 }
 
 app.whenReady().then(createWindow);
