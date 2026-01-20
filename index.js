@@ -273,11 +273,12 @@ async function printImages(job) {
             });
 
             if (isPdf(job, url, i)) {
-                const pdfHtml = buildPdfHtml(url);
-                await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(pdfHtml));
+                // Load PDF as main document (not embed). Printing an embed often yields blank pages;
+                // loading directly makes the PDF viewer the document, so print() captures it.
+                await printWindow.loadURL(url);
                 await Promise.race([
                     readyPromise,
-                    new Promise((_, rej) => setTimeout(() => rej(new Error("PDF load timed out. Please try again.")), 20000)),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error("PDF load timed out. Please try again.")), 25000)),
                 ]);
             } else {
                 const html = buildImageHtml([url]);
@@ -298,8 +299,8 @@ async function printImages(job) {
             }
 
             if (isPdf(job, url, i)) {
-                // PDF viewer needs time to render all pages; too short causes white/blank pages when printing.
-                await new Promise((r) => setTimeout(r, 3500));
+                // PDF viewer must finish laying out all pages before print; otherwise blank pages.
+                await new Promise((r) => setTimeout(r, 5500));
             } else {
                 const waitImages = printWindow.webContents.executeJavaScript(`
                     (function(){
