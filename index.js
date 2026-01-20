@@ -62,7 +62,7 @@ function createWindow() {
         },
     });
 
-    mainWindow.loadURL("https://hostego.in/admin/print");
+    mainWindow.loadURL("https://hostego.in/printego-partner");
 
     // Set the dock icon on macOS
     if (process.platform === "darwin" && app.dock) {
@@ -97,7 +97,31 @@ function buildImageHtml(urls) {
     const body = urls
         .map((u) => `<div class="page"><img src="${u}" /></div>`)
         .join("");
-    return `<!DOCTYPE html><html><head><style>@page{size:A4;margin:0;}body{margin:0;}.page{page-break-after:always;}img{width:100%;height:100%;object-fit:contain;}</style></head><body>${body}</body></html>`;
+    return `<!DOCTYPE html><html><head><style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        @page { size: A4; margin: 0; }
+        @media print { body { margin: 0; padding: 0; } }
+        html, body { width: 100%; height: 100%; margin: 0; padding: 0; }
+        .page { 
+            width: 100%; 
+            height: 100vh; 
+            page-break-after: always; 
+            page-break-inside: avoid;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+        .page:last-child { page-break-after: auto; }
+        img { 
+            max-width: 100%; 
+            max-height: 100%; 
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            display: block;
+        }
+    </style></head><body>${body}</body></html>`;
 }
 
 async function printImages(job) {
@@ -189,6 +213,10 @@ async function printImages(job) {
                         printBackground: true,
                         color: color_mode === "color",
                         copies: qty,
+                        margins: {
+                            marginType: 'none'
+                        },
+                        pageSize: 'A4',
                     };
                     if (targetDevice) printOpts.deviceName = targetDevice;
 
@@ -268,6 +296,10 @@ async function printImages(job) {
                 printBackground: true,
                 color: color_mode === "color",
                 copies: 1,
+                margins: {
+                    marginType: 'none'
+                },
+                pageSize: 'A4',
             };
             if (targetDevice) printOpts.deviceName = targetDevice;
 
