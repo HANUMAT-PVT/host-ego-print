@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
 
-// Mitigate Windows "Access is denied" cache errors
+// Mitigate Windows cache errors
 if (process.platform === "win32") {
     const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || "", "AppData", "Roaming");
     const userDataPath = path.join(appData, "HostegoPrint");
@@ -12,10 +12,7 @@ if (process.platform === "win32") {
     } catch (e) {
         console.warn("Could not set userData path:", e.message);
     }
-    app.commandLine.appendSwitch("disk-cache-size", "0");
 }
-app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
-app.commandLine.appendSwitch("disable-features", "GpuDiskCache");
 
 let mainWindow;
 
@@ -93,6 +90,21 @@ function isPdf(job, url, index) {
     return isPdfUrl(url);
 }
 
+/** Build HTML for printing a single image that fills the page */
+function buildPrintImageHtml(imageDataUrl) {
+    return `<!DOCTYPE html><html><head><style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        @page { size: A4; margin: 0; }
+        html, body { width: 100%; height: 100%; margin: 0; padding: 0; background: white; }
+        img { 
+            width: 100%; 
+            height: 100vh; 
+            object-fit: contain;
+            display: block;
+        }
+    </style></head><body><img src="${imageDataUrl}" /></body></html>`;
+}
+
 /** Build HTML for images */
 function buildImageHtml(urls) {
     const body = urls
@@ -115,6 +127,83 @@ function buildImageHtml(urls) {
     </style></head><body>${body}</body></html>`;
 }
 
+/**
+ * Capture PDF pages as images using Electron's capturePage
+ * This is the key fix - we screenshot the PDF and print the screenshot
+ */
+async function capturePdfAsImages(pdfUrl) {
+    const images = [];
+    
+    // Create a window to render the PDF - MUST be visible for proper rendering
+    const pdfWindow = new BrowserWindow({
+        show: true,  // Must be visible!
+        x: -2000,    // Off-screen but still rendered
+        y: -2000,
+        width: 794,  // A4 width at 96 DPI
+        height: 1123, // A4 height at 96 DPI
+        webPreferences: {
+            sandbox: false,
+        },
+    });
+
+    try {
+        // Load the PDF
+        await pdfWindow.loadURL(pdfUrl);
+        
+        // Wait for PDF to fully render
+        await new Promise(r => setTimeout(r, 4000));
+
+        // Get total pages using PDF.js viewer's internal API
+        let totalPages = 1;
+        try {
+            totalPages = await pdfWindow.webContents.executeJavaScript(`
+                (function() {
+                    // Try to get page count from Chromium's PDF viewer
+                    const viewer = document.querySelector('embed[type="application/pdf"]');
+                    if (viewer && viewer.postMessage) {
+                        return 1; // Can't easily get page count, assume 1 for now
+                    }
+                    // Check if PDFViewerApplication exists (Firefox-style viewer)
+                    if (typeof PDFViewerApplication !== 'undefined' && PDFViewerApplication.pdfDocument) {
+                        return PDFViewerApplication.pdfDocument.numPages;
+                    }
+                    return 1;
+                })();
+            `);
+        } catch (e) {
+            totalPages = 1;
+        }
+
+        // Capture each page
+        for (let page = 1; page <= totalPages; page++) {
+            // Navigate to page if multi-page (for Chromium PDF viewer)
+            if (page > 1) {
+                try {
+                    await pdfWindow.webContents.executeJavaScript(`
+                        if (typeof PDFViewerApplication !== 'undefined') {
+                            PDFViewerApplication.page = ${page};
+                        }
+                    `);
+                    await new Promise(r => setTimeout(r, 1000));
+                } catch (e) {}
+            }
+
+            // Capture the page as an image
+            const image = await pdfWindow.webContents.capturePage();
+            const pngBuffer = image.toPNG();
+            
+            // Save to temp file
+            const tempPath = path.join(app.getPath("temp"), `pdf_page_${Date.now()}_${page}.png`);
+            fs.writeFileSync(tempPath, pngBuffer);
+            images.push(tempPath);
+        }
+    } finally {
+        pdfWindow.close();
+    }
+
+    return images;
+}
+
 async function printJob(job) {
     const { images_urls, quantity, color_mode } = job;
     const deviceName = job.deviceName || job.printerName;
@@ -134,9 +223,10 @@ async function printJob(job) {
         height: 1123,
         webPreferences: {
             sandbox: false,
-            backgroundThrottling: false,
         },
     });
+
+    const tempFiles = []; // Track temp files for cleanup
 
     async function getTargetPrinter() {
         const printers = await getPrintersList(printWindow.webContents);
@@ -166,31 +256,68 @@ async function printJob(job) {
             for (let i = 0; i < urls.length; i++) {
                 const url = urls[i];
 
-                // Wait for page to load
-                const loadPromise = new Promise((resolve) => {
-                    printWindow.webContents.once("did-finish-load", resolve);
-                });
-
                 if (isPdf(job, url, i)) {
-                    // Load PDF directly - Electron's built-in PDF viewer will render it
-                    await printWindow.loadURL(url);
+                    // 🎯 PDF: Capture as image first, then print the image
+                    console.log("Converting PDF to image:", url);
+                    const pdfImages = await capturePdfAsImages(url);
+                    tempFiles.push(...pdfImages);
+
+                    for (const imgPath of pdfImages) {
+                        const loadPromise = new Promise((resolve) => {
+                            printWindow.webContents.once("did-finish-load", resolve);
+                        });
+
+                        // Load the captured image
+                        const html = buildImageHtml([`file://${imgPath}`]);
+                        await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+
+                        await Promise.race([
+                            loadPromise,
+                            new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 15000)),
+                        ]);
+
+                        // Wait for image to load
+                        await printWindow.webContents.executeJavaScript(`
+                            new Promise((resolve) => {
+                                const imgs = document.images;
+                                if (imgs.length === 0) return resolve();
+                                let left = imgs.length;
+                                const done = () => { if (--left === 0) resolve(); };
+                                for (let i = 0; i < imgs.length; i++) {
+                                    if (imgs[i].complete) done();
+                                    else { imgs[i].onload = done; imgs[i].onerror = done; }
+                                }
+                            });
+                        `);
+                        await new Promise((r) => setTimeout(r, 300));
+
+                        // Print
+                        const printOpts = {
+                            silent: true,
+                            printBackground: true,
+                            color: isColor,
+                            copies: 1,
+                            margins: { marginType: "none" },
+                            pageSize: "A4",
+                        };
+                        if (targetPrinter) printOpts.deviceName = targetPrinter;
+
+                        await doPrint(printWindow.webContents, printOpts);
+                    }
                 } else {
-                    // Load image via HTML
+                    // Regular image printing
+                    const loadPromise = new Promise((resolve) => {
+                        printWindow.webContents.once("did-finish-load", resolve);
+                    });
+
                     const html = buildImageHtml([url]);
                     await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-                }
 
-                await Promise.race([
-                    loadPromise,
-                    new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 30000)),
-                ]);
+                    await Promise.race([
+                        loadPromise,
+                        new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 15000)),
+                    ]);
 
-                // Wait for content to render
-                if (isPdf(job, url, i)) {
-                    // PDF needs more time to render
-                    await new Promise((r) => setTimeout(r, 3000));
-                } else {
-                    // Wait for images to load
                     await printWindow.webContents.executeJavaScript(`
                         new Promise((resolve) => {
                             const imgs = document.images;
@@ -203,30 +330,39 @@ async function printJob(job) {
                             }
                         });
                     `);
-                    await new Promise((r) => setTimeout(r, 500));
+                    await new Promise((r) => setTimeout(r, 300));
+
+                    const printOpts = {
+                        silent: true,
+                        printBackground: true,
+                        color: isColor,
+                        copies: 1,
+                        margins: { marginType: "none" },
+                        pageSize: "A4",
+                    };
+                    if (targetPrinter) printOpts.deviceName = targetPrinter;
+
+                    await doPrint(printWindow.webContents, printOpts);
                 }
-
-                // Print
-                const printOpts = {
-                    silent: true,
-                    printBackground: true,
-                    color: isColor,
-                    copies: 1,
-                    margins: { marginType: "none" },
-                    pageSize: "A4",
-                };
-                if (targetPrinter) printOpts.deviceName = targetPrinter;
-
-                await Promise.race([
-                    doPrint(printWindow.webContents, printOpts),
-                    new Promise((_, rej) => setTimeout(() => rej(new Error("Print timed out")), 60000)),
-                ]);
             }
         }
 
         printWindow.close();
+
+        // Cleanup temp files
+        for (const tempFile of tempFiles) {
+            try {
+                if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+            } catch (e) {}
+        }
     } catch (error) {
         printWindow.close();
+        // Cleanup temp files on error too
+        for (const tempFile of tempFiles) {
+            try {
+                if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+            } catch (e) {}
+        }
         throw error;
     }
 }
