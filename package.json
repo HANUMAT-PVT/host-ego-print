@@ -39,9 +39,5 @@
     "electron": "22.3.27",
     "electron-builder": "^26.4.0",
     "png-to-ico": "^3.0.1"
-  },
-  "dependencies": {
-    "mammoth": "^1.11.0",
-    "xlsx": "^0.18.5"
   }
 }

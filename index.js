@@ -1,8 +1,7 @@
 const { app, BrowserWindow, ipcMain, net } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const mammoth = require("mammoth");
-const XLSX = require("xlsx");
+const { exec } = require("child_process");
 
 // Mitigate Windows cache errors
 if (process.platform === "win32") {
@@ -80,20 +79,79 @@ ipcMain.handle("PRINT_JOB", async (_event, job) => {
     }
 });
 
-/** Download file from URL to buffer */
-async function downloadFile(url) {
+/** Download file from URL to local path */
+async function downloadFile(url, destPath) {
     return new Promise((resolve, reject) => {
         const request = net.request(url);
         const chunks = [];
         
         request.on("response", (response) => {
             response.on("data", (chunk) => chunks.push(chunk));
-            response.on("end", () => resolve(Buffer.concat(chunks)));
+            response.on("end", () => {
+                try {
+                    fs.writeFileSync(destPath, Buffer.concat(chunks));
+                    resolve(destPath);
+                } catch (e) {
+                    reject(e);
+                }
+            });
             response.on("error", reject);
         });
         
         request.on("error", reject);
         request.end();
+    });
+}
+
+/** Get LibreOffice command based on platform */
+function getLibreOfficeCommand() {
+    if (process.platform === "win32") {
+        // Common Windows paths for LibreOffice
+        const paths = [
+            "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
+            "C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe",
+            "soffice" // If added to PATH
+        ];
+        for (const p of paths) {
+            if (p === "soffice" || fs.existsSync(p)) {
+                return `"${p}"`;
+            }
+        }
+        return `"${paths[0]}"`; // Default
+    } else if (process.platform === "darwin") {
+        return "/Applications/LibreOffice.app/Contents/MacOS/soffice";
+    } else {
+        return "libreoffice";
+    }
+}
+
+/** Convert document (Word/Excel) to PDF using LibreOffice */
+async function convertToPdf(inputPath, outputDir) {
+    return new Promise((resolve, reject) => {
+        const soffice = getLibreOfficeCommand();
+        const cmd = `${soffice} --headless --convert-to pdf "${inputPath}" --outdir "${outputDir}"`;
+        
+        console.log("Running LibreOffice conversion:", cmd);
+        
+        exec(cmd, { timeout: 60000 }, (error, stdout, stderr) => {
+            if (error) {
+                console.error("LibreOffice error:", error.message);
+                console.error("stderr:", stderr);
+                reject(new Error(`LibreOffice conversion failed: ${error.message}`));
+                return;
+            }
+            
+            // Find the output PDF
+            const inputName = path.basename(inputPath, path.extname(inputPath));
+            const pdfPath = path.join(outputDir, inputName + ".pdf");
+            
+            if (fs.existsSync(pdfPath)) {
+                console.log("PDF created:", pdfPath);
+                resolve(pdfPath);
+            } else {
+                reject(new Error("PDF output not found after conversion"));
+            }
+        });
     });
 }
 
@@ -108,14 +166,12 @@ function getFileType(job, url, index) {
         if (ft.includes("word") || ft.includes("docx") || ft.includes("doc") || ft.includes("document")) return "word";
         if (ft.includes("csv")) return "csv";
         if (ft.includes("text") || ft.includes("txt")) return "text";
-        if (ft.includes("image") || ft.includes("png") || ft.includes("jpg") || ft.includes("jpeg") || ft.includes("gif") || ft.includes("webp")) return "image";
+        if (ft.includes("image")) return "image";
     }
     
     if (/\.pdf($|[?#])/i.test(urlStr)) return "pdf";
-    if (/\.xlsx($|[?#])/i.test(urlStr)) return "excel";
-    if (/\.xls($|[?#])/i.test(urlStr)) return "excel";
-    if (/\.docx($|[?#])/i.test(urlStr)) return "word";
-    if (/\.doc($|[?#])/i.test(urlStr)) return "word";
+    if (/\.(xlsx?|xls)($|[?#])/i.test(urlStr)) return "excel";
+    if (/\.(docx?|doc)($|[?#])/i.test(urlStr)) return "word";
     if (/\.csv($|[?#])/i.test(urlStr)) return "csv";
     if (/\.txt($|[?#])/i.test(urlStr)) return "text";
     if (/\.(png|jpe?g|gif|webp|bmp|svg)($|[?#])/i.test(urlStr)) return "image";
@@ -123,101 +179,49 @@ function getFileType(job, url, index) {
     return "image";
 }
 
-/** Convert Word document to HTML */
-async function wordToHtml(buffer) {
-    const result = await mammoth.convertToHtml({ buffer });
-    return result.value;
+/** Check if file needs LibreOffice conversion */
+function needsConversion(fileType) {
+    return fileType === "word" || fileType === "excel" || fileType === "csv" || fileType === "text";
 }
 
-/** Convert Excel to HTML table */
-function excelToHtml(buffer) {
-    const workbook = XLSX.read(buffer, { type: "buffer" });
-    let html = "";
-    
-    for (const sheetName of workbook.SheetNames) {
-        const sheet = workbook.Sheets[sheetName];
-        const sheetHtml = XLSX.utils.sheet_to_html(sheet, { header: "" });
-        html += `<h2 style="margin: 20px 0 10px 0; font-family: Arial;">${sheetName}</h2>${sheetHtml}`;
+/** Get file extension for download */
+function getExtension(fileType, url) {
+    const urlLower = url.toLowerCase();
+    if (fileType === "word") {
+        return urlLower.includes(".doc") && !urlLower.includes(".docx") ? ".doc" : ".docx";
     }
-    
-    return html;
-}
-
-/** Convert CSV to HTML table */
-function csvToHtml(text) {
-    const lines = text.trim().split("\n");
-    let html = "<table border='1' cellpadding='8' cellspacing='0' style='border-collapse: collapse; width: 100%; font-family: Arial; font-size: 12px;'>";
-    
-    for (let i = 0; i < lines.length; i++) {
-        const cells = lines[i].split(",");
-        const tag = i === 0 ? "th" : "td";
-        html += "<tr>";
-        for (const cell of cells) {
-            html += `<${tag} style="border: 1px solid #333; padding: 8px;">${cell.trim()}</${tag}>`;
-        }
-        html += "</tr>";
+    if (fileType === "excel") {
+        return urlLower.includes(".xls") && !urlLower.includes(".xlsx") ? ".xls" : ".xlsx";
     }
-    
-    html += "</table>";
-    return html;
+    if (fileType === "csv") return ".csv";
+    if (fileType === "text") return ".txt";
+    return ".tmp";
 }
 
-/** Build printable HTML document */
-function buildPrintHtml(content, title = "Document") {
-    return `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>${title}</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        @page { size: A4; margin: 15mm; }
-        html, body { 
-            width: 100%; 
-            min-height: 100%;
-            background: white;
-            font-family: Arial, sans-serif;
-            font-size: 12px;
-            line-height: 1.5;
-            padding: 20px;
-        }
-        table { border-collapse: collapse; width: 100%; margin: 10px 0; }
-        th, td { border: 1px solid #333; padding: 8px; text-align: left; }
-        th { background: #f0f0f0; font-weight: bold; }
-        img { max-width: 100%; height: auto; }
-        pre { white-space: pre-wrap; word-wrap: break-word; font-family: 'Courier New', monospace; }
-    </style>
-</head>
-<body>
-    ${content}
-</body>
-</html>`;
-}
-
-/** Build HTML for image */
-function buildImageHtml(url) {
-    return `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <style>
+/** Build HTML for images */
+function buildImageHtml(urls) {
+    const body = urls
+        .map((u) => `<div class="page"><img src="${u}" /></div>`)
+        .join("");
+    return `<!DOCTYPE html><html><head><style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         @page { size: A4; margin: 0; }
-        html, body { width: 100%; height: 100%; margin: 0; padding: 0; background: white; }
-        .container { width: 100%; height: 100vh; display: flex; align-items: center; justify-content: center; }
+        html, body { width: 100%; height: 100%; margin: 0; padding: 0; }
+        .page { 
+            width: 100%; 
+            height: 100vh; 
+            page-break-after: always; 
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .page:last-child { page-break-after: auto; }
         img { max-width: 100%; max-height: 100%; object-fit: contain; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <img src="${url}" onload="window.loaded=true" onerror="window.loaded=true" />
-    </div>
-</body>
-</html>`;
+    </style></head><body>${body}</body></html>`;
 }
 
 /** Build HTML for PDF using PDF.js */
-function buildPdfHtml(pdfUrl) {
+function buildPdfRenderHtml(pdfUrl) {
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -226,11 +230,25 @@ function buildPdfHtml(pdfUrl) {
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         @page { size: A4; margin: 0; }
-        @media print { .page { page-break-after: always; } .page:last-child { page-break-after: auto; } }
+        @media print { 
+            .page { page-break-after: always; }
+            .page:last-child { page-break-after: auto; }
+        }
         html, body { background: white; }
-        .page { width: 210mm; min-height: 297mm; display: flex; justify-content: center; align-items: center; background: white; }
+        .page { 
+            width: 210mm; 
+            min-height: 297mm;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: white;
+        }
         canvas { max-width: 100%; max-height: 297mm; }
-        #loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: Arial; font-size: 18px; }
+        #loading { 
+            position: fixed; top: 50%; left: 50%; 
+            transform: translate(-50%, -50%);
+            font-family: Arial; font-size: 18px;
+        }
     </style>
 </head>
 <body>
@@ -254,7 +272,10 @@ function buildPdfHtml(pdfUrl) {
                     canvas.width = viewport.width;
                     canvas.height = viewport.height;
                     
-                    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+                    await page.render({
+                        canvasContext: canvas.getContext('2d'),
+                        viewport: viewport
+                    }).promise;
                     
                     const pageDiv = document.createElement('div');
                     pageDiv.className = 'page';
@@ -266,6 +287,7 @@ function buildPdfHtml(pdfUrl) {
                 console.log('PDF rendered:', pdf.numPages, 'pages');
             } catch (error) {
                 document.getElementById('loading').textContent = 'Error: ' + error.message;
+                console.error('PDF render error:', error);
                 window.pdfError = error.message;
             }
         }
@@ -287,15 +309,17 @@ async function printJob(job) {
     const urls = images_urls;
     const qty = Math.max(1, parseInt(quantity, 10) || 1);
     const isColor = String(color_mode || "color").toLowerCase() === "color";
+    const tempFiles = []; // Track temp files for cleanup
 
     // Create print window
     const printWindow = new BrowserWindow({
         show: true,
-        x: 100,
-        y: 100,
+        x: 0,
+        y: 0,
         width: 794,
         height: 1123,
-        title: "Printing...",
+        frame: false,
+        skipTaskbar: true,
         webPreferences: {
             sandbox: false,
             webSecurity: false,
@@ -323,129 +347,141 @@ async function printJob(job) {
         });
     }
 
+    /** Print a PDF (either direct URL or file:// path) */
+    async function printPdf(pdfUrl) {
+        const loadPromise = new Promise((resolve) => {
+            printWindow.webContents.once("did-finish-load", resolve);
+        });
+
+        const html = buildPdfRenderHtml(pdfUrl);
+        await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+
+        await Promise.race([
+            loadPromise,
+            new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 30000)),
+        ]);
+
+        // Wait for PDF.js to finish rendering
+        console.log("Waiting for PDF.js to render...");
+        await printWindow.webContents.executeJavaScript(`
+            new Promise((resolve, reject) => {
+                let checks = 0;
+                const check = () => {
+                    checks++;
+                    if (window.pdfRendered) resolve();
+                    else if (window.pdfError) reject(new Error(window.pdfError));
+                    else if (checks > 150) reject(new Error('PDF render timeout'));
+                    else setTimeout(check, 200);
+                };
+                check();
+            });
+        `);
+
+        await new Promise((r) => setTimeout(r, 1000));
+
+        const printOpts = {
+            silent: true,
+            printBackground: true,
+            color: isColor,
+            copies: 1,
+            margins: { marginType: "none" },
+            pageSize: "A4",
+        };
+        if (targetPrinter) printOpts.deviceName = targetPrinter;
+
+        await doPrint(printWindow.webContents, printOpts);
+    }
+
+    /** Print an image */
+    async function printImage(imageUrl) {
+        const loadPromise = new Promise((resolve) => {
+            printWindow.webContents.once("did-finish-load", resolve);
+        });
+
+        const html = buildImageHtml([imageUrl]);
+        await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+
+        await Promise.race([
+            loadPromise,
+            new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 15000)),
+        ]);
+
+        await printWindow.webContents.executeJavaScript(`
+            new Promise((resolve) => {
+                const imgs = document.images;
+                if (imgs.length === 0) return resolve();
+                let left = imgs.length;
+                const done = () => { if (--left === 0) resolve(); };
+                for (let i = 0; i < imgs.length; i++) {
+                    if (imgs[i].complete) done();
+                    else { imgs[i].onload = done; imgs[i].onerror = done; }
+                }
+            });
+        `);
+        await new Promise((r) => setTimeout(r, 300));
+
+        const printOpts = {
+            silent: true,
+            printBackground: true,
+            color: isColor,
+            copies: 1,
+            margins: { marginType: "none" },
+            pageSize: "A4",
+        };
+        if (targetPrinter) printOpts.deviceName = targetPrinter;
+
+        await doPrint(printWindow.webContents, printOpts);
+    }
+
+    let targetPrinter;
+
     try {
-        const targetPrinter = await getTargetPrinter();
+        targetPrinter = await getTargetPrinter();
         console.log("Using printer:", targetPrinter);
+
+        const tempDir = app.getPath("temp");
 
         for (let q = 0; q < qty; q++) {
             for (let i = 0; i < urls.length; i++) {
                 const url = urls[i];
                 const fileType = getFileType(job, url, i);
                 
-                console.log(`[${i + 1}/${urls.length}] Processing ${fileType}:`, url);
+                console.log(`[${i + 1}/${urls.length}] (copy ${q + 1}) Type: ${fileType}`);
 
-                let html = "";
-
-                // Convert document to HTML based on type
-                if (fileType === "pdf") {
-                    // PDF: Use PDF.js to render to canvas
-                    html = buildPdfHtml(url);
+                if (needsConversion(fileType)) {
+                    // Word/Excel/CSV/TXT → Convert to PDF with LibreOffice → Print PDF
+                    console.log("Converting with LibreOffice:", url);
                     
-                } else if (fileType === "word") {
-                    // Word: Download and convert with mammoth
-                    console.log("Downloading Word document...");
-                    const buffer = await downloadFile(url);
-                    console.log("Converting Word to HTML...");
-                    const content = await wordToHtml(buffer);
-                    html = buildPrintHtml(content, "Word Document");
+                    // Download the file
+                    const ext = getExtension(fileType, url);
+                    const inputPath = path.join(tempDir, `input_${Date.now()}${ext}`);
                     
-                } else if (fileType === "excel") {
-                    // Excel: Download and convert with xlsx
-                    console.log("Downloading Excel file...");
-                    const buffer = await downloadFile(url);
-                    console.log("Converting Excel to HTML...");
-                    const content = excelToHtml(buffer);
-                    html = buildPrintHtml(content, "Excel Spreadsheet");
+                    console.log("Downloading to:", inputPath);
+                    await downloadFile(url, inputPath);
+                    tempFiles.push(inputPath);
                     
-                } else if (fileType === "csv") {
-                    // CSV: Download and convert to table
-                    console.log("Downloading CSV file...");
-                    const buffer = await downloadFile(url);
-                    console.log("Converting CSV to HTML...");
-                    const content = csvToHtml(buffer.toString("utf-8"));
-                    html = buildPrintHtml(content, "CSV File");
+                    // Convert to PDF
+                    console.log("Converting to PDF...");
+                    const pdfPath = await convertToPdf(inputPath, tempDir);
+                    tempFiles.push(pdfPath);
                     
-                } else if (fileType === "text") {
-                    // Text: Download and display as preformatted
-                    console.log("Downloading text file...");
-                    const buffer = await downloadFile(url);
-                    const escaped = buffer.toString("utf-8")
-                        .replace(/&/g, "&amp;")
-                        .replace(/</g, "&lt;")
-                        .replace(/>/g, "&gt;");
-                    html = buildPrintHtml(`<pre>${escaped}</pre>`, "Text File");
+                    // Print the PDF
+                    console.log("Printing converted PDF:", pdfPath);
+                    await printPdf(`file://${pdfPath}`);
+                    console.log("Printed successfully!");
+                    
+                } else if (fileType === "pdf") {
+                    // PDF → Print directly with PDF.js
+                    console.log("Printing PDF:", url);
+                    await printPdf(url);
+                    console.log("Printed successfully!");
                     
                 } else {
-                    // Image: Display directly
-                    html = buildImageHtml(url);
+                    // Image → Print directly
+                    console.log("Printing image:", url);
+                    await printImage(url);
+                    console.log("Printed successfully!");
                 }
-
-                // Load the HTML
-                const loadPromise = new Promise((resolve) => {
-                    printWindow.webContents.once("did-finish-load", resolve);
-                });
-
-                await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-
-                await Promise.race([
-                    loadPromise,
-                    new Promise((resolve) => setTimeout(resolve, 10000)),
-                ]);
-
-                // Wait for content to render
-                if (fileType === "pdf") {
-                    // Wait for PDF.js to finish
-                    console.log("Waiting for PDF.js to render...");
-                    try {
-                        await printWindow.webContents.executeJavaScript(`
-                            new Promise((resolve, reject) => {
-                                let checks = 0;
-                                const check = () => {
-                                    if (window.pdfRendered) resolve();
-                                    else if (window.pdfError) reject(new Error(window.pdfError));
-                                    else if (++checks > 100) reject(new Error('PDF timeout'));
-                                    else setTimeout(check, 200);
-                                };
-                                check();
-                            });
-                        `);
-                    } catch (e) {
-                        console.log("PDF render issue:", e.message);
-                    }
-                    await new Promise((r) => setTimeout(r, 1000));
-                } else if (fileType === "image") {
-                    // Wait for image
-                    try {
-                        await printWindow.webContents.executeJavaScript(`
-                            new Promise((resolve) => {
-                                if (window.loaded) return resolve();
-                                const img = document.querySelector('img');
-                                if (!img || img.complete) return resolve();
-                                img.onload = img.onerror = resolve;
-                                setTimeout(resolve, 5000);
-                            });
-                        `);
-                    } catch (e) {}
-                    await new Promise((r) => setTimeout(r, 500));
-                } else {
-                    // Other documents - just wait a bit
-                    await new Promise((r) => setTimeout(r, 1000));
-                }
-
-                // Print
-                console.log("Printing...");
-                const printOpts = {
-                    silent: true,
-                    printBackground: true,
-                    color: isColor,
-                    copies: 1,
-                    margins: { marginType: fileType === "image" || fileType === "pdf" ? "none" : "default" },
-                    pageSize: "A4",
-                };
-                if (targetPrinter) printOpts.deviceName = targetPrinter;
-
-                await doPrint(printWindow.webContents, printOpts);
-                console.log("Printed successfully!");
             }
         }
 
@@ -456,6 +492,13 @@ async function printJob(job) {
         console.error("Print error:", error.message);
         printWindow.close();
         throw error;
+    } finally {
+        // Cleanup temp files
+        for (const f of tempFiles) {
+            try {
+                if (fs.existsSync(f)) fs.unlinkSync(f);
+            } catch (e) {}
+        }
     }
 }
 
