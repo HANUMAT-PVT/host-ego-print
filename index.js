@@ -1,32 +1,6 @@
-const { app, BrowserWindow, ipcMain, net } = require("electron");
+const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
-
-/** Fetch text content from URL */
-async function fetchTextContent(url) {
-    return new Promise((resolve, reject) => {
-        const request = net.request(url);
-        let data = "";
-        
-        request.on("response", (response) => {
-            response.on("data", (chunk) => {
-                data += chunk.toString();
-            });
-            response.on("end", () => {
-                resolve(data);
-            });
-            response.on("error", (error) => {
-                reject(error);
-            });
-        });
-        
-        request.on("error", (error) => {
-            reject(error);
-        });
-        
-        request.end();
-    });
-}
 
 // Mitigate Windows cache errors
 if (process.platform === "win32") {
@@ -114,6 +88,7 @@ function getFileType(job, url, index) {
         if (ft === "pdf" || ft === "application/pdf" || ft.includes("pdf")) return "pdf";
         if (ft.includes("excel") || ft.includes("xlsx") || ft.includes("xls") || ft.includes("spreadsheet")) return "excel";
         if (ft.includes("word") || ft.includes("docx") || ft.includes("doc") || ft.includes("document")) return "word";
+        if (ft.includes("csv")) return "csv";
         if (ft.includes("text") || ft.includes("txt")) return "text";
         if (ft.includes("image") || ft.includes("png") || ft.includes("jpg") || ft.includes("jpeg") || ft.includes("gif") || ft.includes("webp")) return "image";
     }
@@ -122,6 +97,7 @@ function getFileType(job, url, index) {
     if (/\.pdf($|[?#])/i.test(urlStr)) return "pdf";
     if (/\.(xlsx?|xls)($|[?#])/i.test(urlStr)) return "excel";
     if (/\.(docx?|doc)($|[?#])/i.test(urlStr)) return "word";
+    if (/\.csv($|[?#])/i.test(urlStr)) return "csv";
     if (/\.txt($|[?#])/i.test(urlStr)) return "text";
     if (/\.(png|jpe?g|gif|webp|bmp|svg)($|[?#])/i.test(urlStr)) return "image";
     
@@ -129,106 +105,83 @@ function getFileType(job, url, index) {
     return "image";
 }
 
-function isPdf(job, url, index) {
-    return getFileType(job, url, index) === "pdf";
-}
-
-function isOfficeDoc(job, url, index) {
+/** Check if file is a document that needs to be converted to image */
+function isDocument(job, url, index) {
     const type = getFileType(job, url, index);
-    return type === "excel" || type === "word";
+    return type === "pdf" || type === "excel" || type === "word" || type === "csv" || type === "text";
 }
 
-function isTextFile(job, url, index) {
-    return getFileType(job, url, index) === "text";
+function isImage(job, url, index) {
+    return getFileType(job, url, index) === "image";
 }
 
 
 
 /**
- * Build HTML to render Office documents (Word, Excel) using Google Docs Viewer
- * Google Docs Viewer renders these as images which print perfectly
+ * Capture any document (PDF, Word, Excel, CSV, TXT) as images using Google Docs Viewer
+ * This is the most reliable approach - render in Google Docs, screenshot, print as image
  */
-function buildOfficeDocHtml(docUrl) {
-    const encodedUrl = encodeURIComponent(docUrl);
-    return `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        @page { size: A4; margin: 0; }
-        html, body { width: 100%; height: 100%; margin: 0; padding: 0; background: white; }
-        iframe { 
-            width: 100%; 
-            height: 100vh; 
-            border: none;
-        }
-        #loading {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            font-family: Arial, sans-serif;
-            font-size: 18px;
-        }
-    </style>
-</head>
-<body>
-    <div id="loading">Loading document...</div>
-    <iframe 
-        src="https://docs.google.com/viewer?url=${encodedUrl}&embedded=true" 
-        onload="document.getElementById('loading').style.display='none'; window.docLoaded=true;"
-        onerror="document.getElementById('loading').textContent='Error loading document'; window.docError=true;">
-    </iframe>
-    <script>
-        // Fallback: mark as loaded after timeout
-        setTimeout(() => { 
-            if (!window.docLoaded && !window.docError) {
-                window.docLoaded = true; 
-            }
-        }, 10000);
-    </script>
-</body>
-</html>`;
-}
-
-/**
- * Build HTML to display text file content
- */
-function buildTextFileHtml(textContent) {
-    const escaped = String(textContent || "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
+async function captureDocumentAsImages(docUrl, fileType) {
+    const images = [];
     
-    return `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        @page { size: A4; margin: 10mm; }
-        html, body { 
-            width: 100%; 
-            min-height: 100%; 
-            margin: 0; 
-            padding: 20px; 
-            background: white;
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 12px;
-            line-height: 1.5;
-        }
-        pre {
-            white-space: pre-wrap;
-            word-wrap: break-word;
-        }
-    </style>
-</head>
-<body>
-    <pre>${escaped}</pre>
-</body>
-</html>`;
+    // Create visible window for document rendering
+    const docWindow = new BrowserWindow({
+        show: true,
+        x: 0,
+        y: 0,
+        width: 794,   // A4 width at 96 DPI
+        height: 1123, // A4 height at 96 DPI
+        frame: false,
+        skipTaskbar: true,
+        webPreferences: {
+            sandbox: false,
+            webSecurity: false,
+        },
+    });
+
+    try {
+        console.log(`Loading ${fileType} document:`, docUrl);
+        
+        const encodedUrl = encodeURIComponent(docUrl);
+        
+        // Use Google Docs Viewer for all document types (PDF, Word, Excel, CSV, TXT)
+        // It renders them as images which we can capture
+        const viewerUrl = `https://docs.google.com/viewer?url=${encodedUrl}&embedded=true`;
+        
+        const loadPromise = new Promise((resolve) => {
+            docWindow.webContents.once("did-finish-load", resolve);
+        });
+        
+        await docWindow.loadURL(viewerUrl);
+        
+        await Promise.race([
+            loadPromise,
+            new Promise((resolve) => setTimeout(resolve, 5000)), // Max 5s for initial load
+        ]);
+        
+        // Wait for Google Docs Viewer to render the document
+        console.log("Waiting for document to render...");
+        await new Promise((r) => setTimeout(r, 8000)); // 8 seconds for full render
+        
+        // Capture the page as an image
+        console.log("Capturing document as image...");
+        const image = await docWindow.webContents.capturePage();
+        const pngBuffer = image.toPNG();
+        
+        // Save to temp file
+        const tempPath = path.join(app.getPath("temp"), `doc_${Date.now()}.png`);
+        fs.writeFileSync(tempPath, pngBuffer);
+        images.push(tempPath);
+        
+        console.log("Document captured successfully:", tempPath);
+        
+    } catch (error) {
+        console.error("Failed to capture document:", error.message);
+    } finally {
+        docWindow.close();
+    }
+
+    return images;
 }
 
 /** Build HTML for images */
@@ -253,96 +206,6 @@ function buildImageHtml(urls) {
     </style></head><body>${body}</body></html>`;
 }
 
-/**
- * Create HTML that renders PDF using PDF.js in browser (client-side rendering)
- * This renders the PDF to canvas in the browser, avoiding GPU issues
- */
-function buildPdfRenderHtml(pdfUrl) {
-    return `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        @page { size: A4; margin: 0; }
-        @media print { 
-            .page { page-break-after: always; }
-            .page:last-child { page-break-after: auto; }
-        }
-        html, body { background: white; }
-        .page { 
-            width: 210mm; 
-            min-height: 297mm;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            background: white;
-        }
-        canvas { 
-            max-width: 100%; 
-            max-height: 297mm;
-        }
-        #loading { 
-            position: fixed; 
-            top: 50%; 
-            left: 50%; 
-            transform: translate(-50%, -50%);
-            font-family: Arial, sans-serif;
-            font-size: 18px;
-        }
-    </style>
-</head>
-<body>
-    <div id="loading">Loading PDF...</div>
-    <div id="pages"></div>
-    <script>
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-        
-        async function renderPDF() {
-            try {
-                const pdf = await pdfjsLib.getDocument('${pdfUrl}').promise;
-                document.getElementById('loading').style.display = 'none';
-                
-                const container = document.getElementById('pages');
-                
-                for (let i = 1; i <= pdf.numPages; i++) {
-                    const page = await pdf.getPage(i);
-                    const scale = 2; // High quality
-                    const viewport = page.getViewport({ scale });
-                    
-                    const canvas = document.createElement('canvas');
-                    const context = canvas.getContext('2d');
-                    canvas.width = viewport.width;
-                    canvas.height = viewport.height;
-                    
-                    await page.render({
-                        canvasContext: context,
-                        viewport: viewport
-                    }).promise;
-                    
-                    const pageDiv = document.createElement('div');
-                    pageDiv.className = 'page';
-                    pageDiv.appendChild(canvas);
-                    container.appendChild(pageDiv);
-                }
-                
-                // Signal that rendering is complete
-                window.pdfRendered = true;
-                console.log('PDF rendered:', pdf.numPages, 'pages');
-            } catch (error) {
-                document.getElementById('loading').textContent = 'Error: ' + error.message;
-                console.error('PDF render error:', error);
-                window.pdfError = error.message;
-            }
-        }
-        
-        renderPDF();
-    </script>
-</body>
-</html>`;
-}
-
 async function printJob(job) {
     const { images_urls, quantity, color_mode } = job;
     const deviceName = job.deviceName || job.printerName;
@@ -354,8 +217,9 @@ async function printJob(job) {
     const urls = images_urls;
     const qty = Math.max(1, parseInt(quantity, 10) || 1);
     const isColor = String(color_mode || "color").toLowerCase() === "color";
+    const tempFiles = []; // Track temp files for cleanup
 
-    // Create print window - visible for proper rendering
+    // Create print window for printing images
     const printWindow = new BrowserWindow({
         show: true,
         x: 0,
@@ -366,7 +230,6 @@ async function printJob(job) {
         skipTaskbar: true,
         webPreferences: {
             sandbox: false,
-            webSecurity: false, // Allow loading PDF from any URL
         },
     });
 
@@ -391,219 +254,103 @@ async function printJob(job) {
         });
     }
 
+    /** Print a single image file */
+    async function printImage(imagePath, printer, color) {
+        const loadPromise = new Promise((resolve) => {
+            printWindow.webContents.once("did-finish-load", resolve);
+        });
+
+        const html = buildImageHtml([imagePath]);
+        await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+
+        await Promise.race([
+            loadPromise,
+            new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 15000)),
+        ]);
+
+        // Wait for image to load
+        await printWindow.webContents.executeJavaScript(`
+            new Promise((resolve) => {
+                const imgs = document.images;
+                if (imgs.length === 0) return resolve();
+                let left = imgs.length;
+                const done = () => { if (--left === 0) resolve(); };
+                for (let i = 0; i < imgs.length; i++) {
+                    if (imgs[i].complete) done();
+                    else { imgs[i].onload = done; imgs[i].onerror = done; }
+                }
+            });
+        `);
+        await new Promise((r) => setTimeout(r, 300));
+
+        const printOpts = {
+            silent: true,
+            printBackground: true,
+            color: color,
+            copies: 1,
+            margins: { marginType: "none" },
+            pageSize: "A4",
+        };
+        if (printer) printOpts.deviceName = printer;
+
+        await doPrint(printWindow.webContents, printOpts);
+    }
+
     try {
         const targetPrinter = await getTargetPrinter();
 
         for (let q = 0; q < qty; q++) {
             for (let i = 0; i < urls.length; i++) {
                 const url = urls[i];
+                const fileType = getFileType(job, url, i);
 
-                if (isPdf(job, url, i)) {
-                    // 🎯 PDF: Use PDF.js in browser to render to canvas, then print
-                    console.log("Rendering PDF with PDF.js:", url);
+                if (isDocument(job, url, i)) {
+                    // 📄 DOCUMENT (PDF, Word, Excel, CSV, TXT): 
+                    // Step 1: Capture as image using Google Docs Viewer
+                    // Step 2: Print the image
+                    console.log(`Converting ${fileType} to image:`, url);
 
-                    const loadPromise = new Promise((resolve) => {
-                        printWindow.webContents.once("did-finish-load", resolve);
-                    });
+                    const capturedImages = await captureDocumentAsImages(url, fileType);
+                    tempFiles.push(...capturedImages);
 
-                    // Load HTML that uses PDF.js to render PDF to canvas
-                    const html = buildPdfRenderHtml(url);
-                    await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-
-                    await Promise.race([
-                        loadPromise,
-                        new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 30000)),
-                    ]);
-
-                    // Wait for PDF.js to finish rendering
-                    console.log("Waiting for PDF.js to render...");
-                    await printWindow.webContents.executeJavaScript(`
-                        new Promise((resolve, reject) => {
-                            let checks = 0;
-                            const check = () => {
-                                checks++;
-                                if (window.pdfRendered) {
-                                    resolve();
-                                } else if (window.pdfError) {
-                                    reject(new Error(window.pdfError));
-                                } else if (checks > 100) {
-                                    reject(new Error('PDF render timeout'));
-                                } else {
-                                    setTimeout(check, 200);
-                                }
-                            };
-                            check();
-                        });
-                    `);
-
-                    // Extra wait for canvas rendering to complete
-                    await new Promise((r) => setTimeout(r, 1000));
-
-                    // Print
-                    const printOpts = {
-                        silent: true,
-                        printBackground: true,
-                        color: isColor,
-                        copies: 1,
-                        deviceName: targetPrinter,
-
-                        margins: {
-                            marginType: "none",
-                        },
-
-                        pageSize: {
-                            width: 210000,   // microns
-                            height: 297000,
-                        },
-
-                        scaleFactor: 100,
-                    };
-
-                    if (targetPrinter) printOpts.deviceName = targetPrinter;
-
-                    console.log("Printing PDF...");
-                    await doPrint(printWindow.webContents, printOpts);
-                    console.log("PDF printed successfully");
-
-                } else if (isOfficeDoc(job, url, i)) {
-                    // 📄 Word/Excel: Use Google Docs Viewer to render
-                    console.log("Rendering Office document with Google Docs Viewer:", url);
-
-                    const loadPromise = new Promise((resolve) => {
-                        printWindow.webContents.once("did-finish-load", resolve);
-                    });
-
-                    const html = buildOfficeDocHtml(url);
-                    await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-
-                    await Promise.race([
-                        loadPromise,
-                        new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 30000)),
-                    ]);
-
-                    // Wait for Google Docs Viewer to load the document
-                    console.log("Waiting for document to load...");
-                    await printWindow.webContents.executeJavaScript(`
-                        new Promise((resolve) => {
-                            let checks = 0;
-                            const check = () => {
-                                checks++;
-                                if (window.docLoaded || window.docError || checks > 50) {
-                                    resolve();
-                                } else {
-                                    setTimeout(check, 300);
-                                }
-                            };
-                            check();
-                        });
-                    `);
-
-                    // Extra wait for iframe content to render
-                    await new Promise((r) => setTimeout(r, 3000));
-
-                    const printOpts = {
-                        silent: true,
-                        printBackground: true,
-                        color: isColor,
-                        copies: 1,
-                        margins: { marginType: "none" },
-                        pageSize: "A4",
-                    };
-                    if (targetPrinter) printOpts.deviceName = targetPrinter;
-
-                    console.log("Printing Office document...");
-                    await doPrint(printWindow.webContents, printOpts);
-                    console.log("Office document printed successfully");
-
-                } else if (isTextFile(job, url, i)) {
-                    // 📝 Text file: Fetch content and display as HTML
-                    console.log("Loading text file:", url);
-
-                    let textContent = "";
-                    try {
-                        textContent = await fetchTextContent(url);
-                    } catch (e) {
-                        console.error("Failed to fetch text file:", e.message);
-                        textContent = "Error loading file: " + e.message;
+                    if (capturedImages.length === 0) {
+                        console.error("Failed to capture document, skipping:", url);
+                        continue;
                     }
 
-                    const loadPromise = new Promise((resolve) => {
-                        printWindow.webContents.once("did-finish-load", resolve);
-                    });
-
-                    const html = buildTextFileHtml(textContent);
-                    await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-
-                    await Promise.race([
-                        loadPromise,
-                        new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 15000)),
-                    ]);
-
-                    await new Promise((r) => setTimeout(r, 500));
-
-                    const printOpts = {
-                        silent: true,
-                        printBackground: true,
-                        color: isColor,
-                        copies: 1,
-                        margins: { marginType: "default" }, // Use default margins for text
-                        pageSize: "A4",
-                    };
-                    if (targetPrinter) printOpts.deviceName = targetPrinter;
-
-                    console.log("Printing text file...");
-                    await doPrint(printWindow.webContents, printOpts);
-                    console.log("Text file printed successfully");
+                    // Print each captured image
+                    for (const imgPath of capturedImages) {
+                        console.log("Printing captured image:", imgPath);
+                        await printImage(`file://${imgPath}`, targetPrinter, isColor);
+                        console.log("Printed successfully");
+                    }
 
                 } else {
-                    // 🖼️ Image: Load and print directly
+                    // 🖼️ IMAGE: Print directly
                     console.log("Printing image:", url);
-
-                    const loadPromise = new Promise((resolve) => {
-                        printWindow.webContents.once("did-finish-load", resolve);
-                    });
-
-                    const html = buildImageHtml([url]);
-                    await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-
-                    await Promise.race([
-                        loadPromise,
-                        new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 15000)),
-                    ]);
-
-                    await printWindow.webContents.executeJavaScript(`
-                        new Promise((resolve) => {
-                            const imgs = document.images;
-                            if (imgs.length === 0) return resolve();
-                            let left = imgs.length;
-                            const done = () => { if (--left === 0) resolve(); };
-                            for (let i = 0; i < imgs.length; i++) {
-                                if (imgs[i].complete) done();
-                                else { imgs[i].onload = done; imgs[i].onerror = done; }
-                            }
-                        });
-                    `);
-                    await new Promise((r) => setTimeout(r, 300));
-
-                    const printOpts = {
-                        silent: true,
-                        printBackground: true,
-                        color: isColor,
-                        copies: 1,
-                        margins: { marginType: "none" },
-                        pageSize: "A4",
-                    };
-                    if (targetPrinter) printOpts.deviceName = targetPrinter;
-
-                    await doPrint(printWindow.webContents, printOpts);
+                    await printImage(url, targetPrinter, isColor);
                     console.log("Image printed successfully");
                 }
             }
         }
 
         printWindow.close();
+
+        // Cleanup temp files
+        for (const tempFile of tempFiles) {
+            try {
+                if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+            } catch (e) {}
+        }
+
     } catch (error) {
         printWindow.close();
+        // Cleanup temp files on error
+        for (const tempFile of tempFiles) {
+            try {
+                if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+            } catch (e) {}
+        }
         throw error;
     }
 }
