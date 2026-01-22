@@ -67,22 +67,40 @@ function downloadFile(url, destPath) {
         const protocol = url.startsWith("https") ? https : http;
         const file = fs.createWriteStream(destPath);
         
-        protocol.get(url, (response) => {
-            if (response.statusCode !== 200) {
+        const handleResponse = (response) => {
+            // Handle redirects
+            if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307 || response.statusCode === 308) {
                 file.close();
                 fs.unlinkSync(destPath);
-                return reject(new Error(`Download failed: ${response.statusCode}`));
+                const redirectUrl = response.headers.location;
+                console.log("Following redirect to:", redirectUrl);
+                return downloadFile(redirectUrl, destPath).then(resolve).catch(reject);
+            }
+            
+            if (response.statusCode !== 200) {
+                file.close();
+                if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+                return reject(new Error(`Download failed with status: ${response.statusCode}`));
             }
             
             response.pipe(file);
             
             file.on("finish", () => {
                 file.close();
+                console.log("Download completed:", destPath);
                 resolve(destPath);
             });
-        }).on("error", (err) => {
+            
+            file.on("error", (err) => {
+                file.close();
+                if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+                reject(err);
+            });
+        };
+        
+        protocol.get(url, handleResponse).on("error", (err) => {
             file.close();
-            fs.unlinkSync(destPath);
+            if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
             reject(err);
         });
     });
@@ -229,6 +247,9 @@ function buildImageHtml(urls) {
  * This renders the PDF to canvas in the browser, avoiding GPU issues
  */
 function buildPdfRenderHtml(pdfUrl) {
+    // Escape single quotes in URL for JavaScript string
+    const escapedUrl = pdfUrl.replace(/'/g, "\\'");
+    
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -272,10 +293,15 @@ function buildPdfRenderHtml(pdfUrl) {
         
         async function renderPDF() {
             try {
-                const pdf = await pdfjsLib.getDocument('${pdfUrl}').promise;
+                console.log('Loading PDF from:', '${escapedUrl}');
+                const pdf = await pdfjsLib.getDocument({
+                    url: '${escapedUrl}',
+                    isEvalSupported: false
+                }).promise;
                 document.getElementById('loading').style.display = 'none';
                 
                 const container = document.getElementById('pages');
+                console.log('PDF loaded, pages:', pdf.numPages);
                 
                 for (let i = 1; i <= pdf.numPages; i++) {
                     const page = await pdf.getPage(i);
@@ -296,11 +322,12 @@ function buildPdfRenderHtml(pdfUrl) {
                     pageDiv.className = 'page';
                     pageDiv.appendChild(canvas);
                     container.appendChild(pageDiv);
+                    console.log('Rendered page', i);
                 }
                 
                 // Signal that rendering is complete
                 window.pdfRendered = true;
-                console.log('PDF rendered:', pdf.numPages, 'pages');
+                console.log('PDF rendered successfully:', pdf.numPages, 'pages');
             } catch (error) {
                 document.getElementById('loading').textContent = 'Error: ' + error.message;
                 console.error('PDF render error:', error);
@@ -318,12 +345,23 @@ async function printJob(job) {
     const { images_urls, quantity, color_mode } = job;
     const deviceName = job.deviceName || job.printerName;
 
+    console.log("=== PRINT JOB START ===");
+    console.log("Job data:", JSON.stringify(job, null, 2));
+
     if (!images_urls || !Array.isArray(images_urls) || images_urls.length === 0) {
         throw new Error("images_urls is required and must be a non-empty array.");
     }
 
     // Check if any URL is a document and LibreOffice is required
-    const hasDocuments = images_urls.some((url, i) => isDocument(job, url, i));
+    const hasDocuments = images_urls.some((url, i) => {
+        const isDoc = isDocument(job, url, i);
+        console.log(`URL ${i}: ${url} -> isDocument: ${isDoc}`);
+        return isDoc;
+    });
+    
+    console.log("Has documents:", hasDocuments);
+    console.log("LibreOffice installed:", isLibreOfficeInstalled());
+    
     if (hasDocuments && !isLibreOfficeInstalled()) {
         const errorMsg = "LibreOffice Required\n\nTo print Word or Excel files, please install LibreOffice.\n\nDownload: https://www.libreoffice.org/download/";
         dialog.showErrorBox("LibreOffice Required", errorMsg);
@@ -383,6 +421,7 @@ async function printJob(job) {
             for (let i = 0; i < urls.length; i++) {
                 let url = urls[i];
                 let tempFilePath = null;
+                let isConvertedDocument = false;
 
                 // 📄 Handle documents (DOCX, XLSX, etc.) - Convert to PDF first
                 if (isDocument(job, url, i)) {
@@ -403,6 +442,7 @@ async function printJob(job) {
                         // Update URL to point to converted PDF
                         url = "file://" + pdfPath;
                         tempFilePath = downloadPath; // Mark for cleanup
+                        isConvertedDocument = true; // Flag that this was converted
                         
                         // Now treat it as a PDF for printing
                     } catch (conversionError) {
@@ -411,7 +451,7 @@ async function printJob(job) {
                     }
                 }
 
-                if (isPdf(job, url, i) || isDocument(job, urls[i], i)) {
+                if (isPdf(job, url, i) || isConvertedDocument) {
                     // 🎯 PDF: Use PDF.js in browser to render to canvas, then print
                     console.log("Rendering PDF with PDF.js:", url);
 
