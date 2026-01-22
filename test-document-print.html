@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Print Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .container {
+            border: 1px solid #ddd;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        h1 {
+            color: #333;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 4px;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .error {
+            color: #f44336;
+            padding: 10px;
+            background: #ffebee;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .success {
+            color: #4CAF50;
+            padding: 10px;
+            background: #e8f5e9;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .info {
+            color: #2196F3;
+            padding: 10px;
+            background: #e3f2fd;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        input {
+            width: 100%;
+            padding: 8px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        #log {
+            background: #1e1e1e;
+            color: #0f0;
+            padding: 15px;
+            border-radius: 4px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+        .log-entry {
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🖨️ Hostego Document Print Test</h1>
+        
+        <div class="test-section">
+            <h3>Capabilities Check</h3>
+            <button onclick="checkCapabilities()">Check Capabilities</button>
+            <div id="capabilities"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>Test Document Print</h3>
+            <p>Enter a document URL (DOCX, XLSX, etc.):</p>
+            <input type="text" id="docUrl" placeholder="https://example.com/document.docx" />
+            
+            <p>Or try a test document:</p>
+            <button onclick="testDocxPrint()">Test DOCX Print</button>
+            <button onclick="testXlsxPrint()">Test XLSX Print</button>
+            <button onclick="testPdfPrint()">Test PDF Print</button>
+            <button onclick="testCustomUrl()">Test Custom URL</button>
+            
+            <div id="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>Console Log</h3>
+            <div id="log"></div>
+        </div>
+    </div>
+
+    <script>
+        const logDiv = document.getElementById('log');
+        
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+
+        async function checkCapabilities() {
+            const capDiv = document.getElementById('capabilities');
+            
+            if (!window.hostego) {
+                capDiv.innerHTML = '<div class="error">❌ window.hostego not available! Are you running in Hostego Desktop?</div>';
+                log('ERROR: window.hostego not available', 'error');
+                return;
+            }
+
+            try {
+                log('Checking capabilities...');
+                const caps = await window.hostego.getCapabilities();
+                log('Capabilities received: ' + JSON.stringify(caps));
+                
+                let html = '<div class="success">✅ Capabilities loaded:</div>';
+                html += '<div class="info">';
+                html += '<strong>Version:</strong> ' + caps.version + '<br>';
+                html += '<strong>Supports Images:</strong> ' + (caps.supportsImages ? '✅' : '❌') + '<br>';
+                html += '<strong>Supports PDF:</strong> ' + (caps.supportsPDF ? '✅' : '❌') + '<br>';
+                html += '<strong>Supports Documents:</strong> ' + (caps.supportsDocuments ? '✅' : '❌') + '<br>';
+                html += '<strong>LibreOffice Installed:</strong> ' + (caps.libreOfficeInstalled ? '✅' : '❌') + '<br>';
+                html += '<strong>Supported Extensions:</strong> ' + caps.supportedExtensions.join(', ') + '<br>';
+                html += '</div>';
+                
+                capDiv.innerHTML = html;
+            } catch (err) {
+                capDiv.innerHTML = '<div class="error">❌ Error: ' + err.message + '</div>';
+                log('ERROR: ' + err.message, 'error');
+            }
+        }
+
+        async function printDocument(url, fileType = null) {
+            const resultDiv = document.getElementById('result');
+            
+            if (!window.hostego) {
+                resultDiv.innerHTML = '<div class="error">❌ window.hostego not available!</div>';
+                log('ERROR: window.hostego not available', 'error');
+                return;
+            }
+
+            try {
+                log('Starting print job for: ' + url);
+                resultDiv.innerHTML = '<div class="info">⏳ Printing...</div>';
+                
+                const printOptions = {
+                    images_urls: [url],
+                    quantity: 1,
+                    color_mode: 'color'
+                };
+                
+                if (fileType) {
+                    printOptions.file_types = [fileType];
+                }
+                
+                log('Print options: ' + JSON.stringify(printOptions));
+                
+                const result = await window.hostego.print(printOptions);
+                
+                log('Print result: ' + JSON.stringify(result));
+                
+                if (result.success) {
+                    resultDiv.innerHTML = '<div class="success">✅ Print job completed successfully!</div>';
+                } else {
+                    resultDiv.innerHTML = '<div class="error">❌ Print failed: ' + result.error + '</div>';
+                }
+            } catch (err) {
+                resultDiv.innerHTML = '<div class="error">❌ Error: ' + err.message + '</div>';
+                log('ERROR: ' + err.message, 'error');
+            }
+        }
+
+        function testDocxPrint() {
+            // Sample DOCX file - will be converted to PDF via LibreOffice
+            const url = 'https://calibre-ebook.com/downloads/demos/demo.docx';
+            log('Testing DOCX print with sample file');
+            log('Note: This will download the DOCX, convert to PDF via LibreOffice, then print');
+            printDocument(url, 'docx');
+        }
+
+        function testXlsxPrint() {
+            // Sample XLSX file - will be converted to PDF via LibreOffice
+            const url = 'https://file-examples.com/storage/fe2e0f7a3fbb51e24286520/2017/02/file_example_XLSX_10.xlsx';
+            log('Testing XLSX print with sample file');
+            log('Note: This will download the XLSX, convert to PDF via LibreOffice, then print');
+            printDocument(url, 'xlsx');
+        }
+
+        function testPdfPrint() {
+            // Sample PDF file
+            const url = 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf';
+            log('Testing PDF print with sample file');
+            printDocument(url, 'pdf');
+        }
+
+        function testCustomUrl() {
+            const url = document.getElementById('docUrl').value;
+            if (!url) {
+                document.getElementById('result').innerHTML = '<div class="error">❌ Please enter a URL</div>';
+                return;
+            }
+            log('Testing custom URL: ' + url);
+            printDocument(url);
+        }
+
+        // Auto-check capabilities on load
+        window.addEventListener('load', () => {
+            log('Page loaded');
+            setTimeout(checkCapabilities, 500);
+        });
+    </script>
+</body>
+</html>

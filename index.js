@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { execFile } = require("child_process");
@@ -45,10 +45,10 @@ function isDocumentUrl(url) {
 
 /** Check if file is a document based on job metadata or URL */
 function isDocument(job, url, index) {
-    const ft = job.file_types && Array.isArray(job.file_types) 
-        ? String(job.file_types[index] || "").toLowerCase() 
+    const ft = job.file_types && Array.isArray(job.file_types)
+        ? String(job.file_types[index] || "").toLowerCase()
         : "";
-    
+
     // Check explicit file type
     if (ft) {
         const docTypes = ["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"];
@@ -56,7 +56,7 @@ function isDocument(job, url, index) {
             if (ft === type || ft.includes(type)) return true;
         }
     }
-    
+
     // Fallback to URL extension check
     return isDocumentUrl(url);
 }
@@ -66,7 +66,7 @@ function downloadFile(url, destPath) {
     return new Promise((resolve, reject) => {
         const protocol = url.startsWith("https") ? https : http;
         const file = fs.createWriteStream(destPath);
-        
+
         const handleResponse = (response) => {
             // Handle redirects
             if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307 || response.statusCode === 308) {
@@ -76,28 +76,28 @@ function downloadFile(url, destPath) {
                 console.log("Following redirect to:", redirectUrl);
                 return downloadFile(redirectUrl, destPath).then(resolve).catch(reject);
             }
-            
+
             if (response.statusCode !== 200) {
                 file.close();
                 if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
                 return reject(new Error(`Download failed with status: ${response.statusCode}`));
             }
-            
+
             response.pipe(file);
-            
+
             file.on("finish", () => {
                 file.close();
                 console.log("Download completed:", destPath);
                 resolve(destPath);
             });
-            
+
             file.on("error", (err) => {
                 file.close();
                 if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
                 reject(err);
             });
         };
-        
+
         protocol.get(url, handleResponse).on("error", (err) => {
             file.close();
             if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
@@ -110,7 +110,7 @@ function downloadFile(url, destPath) {
 function convertToPDF(inputPath, outputDir) {
     return new Promise((resolve, reject) => {
         const libreOfficePath = getLibreOfficePath();
-        
+
         execFile(
             libreOfficePath,
             [
@@ -132,12 +132,12 @@ function convertToPDF(inputPath, outputDir) {
                     outputDir,
                     path.basename(inputPath).replace(/\.(docx?|xlsx?|pptx?|odt|ods|odp)$/i, ".pdf")
                 );
-                
+
                 // Check if PDF was created
                 if (!fs.existsSync(pdfPath)) {
                     return reject(new Error("PDF conversion failed - output file not found"));
                 }
-                
+
                 resolve(pdfPath);
             }
         );
@@ -184,9 +184,118 @@ function createWindow() {
 
     mainWindow.loadURL("https://hostego.in/printego-partner");
 
+    // Open DevTools for debugging (remove in production)
+    // mainWindow.webContents.openDevTools();
+
+    // Inject script to extend supported file types in web app
+    mainWindow.webContents.on('did-finish-load', () => {
+        console.log("Web page loaded, injecting capabilities...");
+
+        mainWindow.webContents.executeJavaScript(`
+            // Extend the web app to support document files
+            console.log('%c🖨️ Hostego Desktop Print Client Loaded', 'color: #4CAF50; font-weight: bold; font-size: 14px;');
+            
+            if (window.hostego && window.hostego.getCapabilities) {
+                window.hostego.getCapabilities().then(caps => {
+                    console.log('%c📋 Desktop Capabilities:', 'color: #2196F3; font-weight: bold;', caps);
+                    
+                    // Store capabilities globally so web app can check
+                    window.hostegoCapabilities = caps;
+                    
+                    // Notify the page that we support documents
+                    if (caps.supportsDocuments) {
+                        console.log('%c✅ Document printing enabled (LibreOffice detected)', 'color: #4CAF50;');
+                        
+                        // Dispatch event for web app to listen to
+                        window.dispatchEvent(new CustomEvent('hostego:capabilities', { 
+                            detail: caps 
+                        }));
+                    }
+                    
+                    // Override the print function to log what's being sent
+                    if (window.hostego && window.hostego.print) {
+                        const originalPrint = window.hostego.print;
+                        window.hostego.print = function(options) {
+                            console.log('%c📤 Print job requested:', 'color: #FF9800; font-weight: bold;', options);
+                            return originalPrint(options);
+                        };
+                    }
+                }).catch(err => {
+                    console.error('Failed to get capabilities:', err);
+                });
+            } else {
+                console.warn('⚠️ hostego.getCapabilities not available');
+            }
+        `).catch(err => {
+            console.log('Script injection failed:', err.message);
+        });
+    });
+
     if (process.platform === "darwin" && app.dock) {
         app.dock.setIcon(iconPath);
     }
+
+    // Create application menu
+    const template = [
+        {
+            label: 'File',
+            submenu: [
+                {
+                    label: 'Open Hostego Partner',
+                    click: () => {
+                        mainWindow.loadURL("https://hostego.in/printego-partner");
+                    }
+                },
+                {
+                    label: 'Open Test Page',
+                    click: () => {
+                        mainWindow.loadFile(path.join(__dirname, 'test-document-print.html'));
+                    }
+                },
+                { type: 'separator' },
+                {
+                    label: 'Reload',
+                    accelerator: 'CmdOrCtrl+R',
+                    click: () => {
+                        mainWindow.reload();
+                    }
+                },
+                {
+                    label: 'Toggle DevTools',
+                    accelerator: 'CmdOrCtrl+Shift+I',
+                    click: () => {
+                        mainWindow.webContents.toggleDevTools();
+                    }
+                },
+                { type: 'separator' },
+                { role: 'quit' }
+            ]
+        },
+        {
+            label: 'Help',
+            submenu: [
+                {
+                    label: 'Check LibreOffice',
+                    click: () => {
+                        const installed = isLibreOfficeInstalled();
+                        const message = installed
+                            ? 'LibreOffice is installed and ready!\n\nPath: ' + getLibreOfficePath()
+                            : 'LibreOffice is NOT installed.\n\nPlease install it to print documents.\n\nDownload: https://www.libreoffice.org/download/';
+
+                        dialog.showMessageBox({
+                            type: installed ? 'info' : 'warning',
+                            title: 'LibreOffice Status',
+                            message: message,
+                            buttons: ['OK']
+                        });
+                    }
+                }
+            ]
+        }
+    ];
+
+    const menu = Menu.buildFromTemplate(template);
+    Menu.setApplicationMenu(menu);
 }
 
 ipcMain.handle("GET_PRINTERS", async () => {
@@ -204,6 +313,45 @@ ipcMain.handle("PRINT_JOB", async (_event, job) => {
         console.error("Print failed", err);
         return { success: false, error: err.message };
     }
+});
+
+ipcMain.handle("GET_SUPPORTED_FILE_TYPES", async () => {
+    const baseTypes = [
+        "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp",
+        "application/pdf", "pdf"
+    ];
+
+    // Add document types if LibreOffice is installed
+    if (isLibreOfficeInstalled()) {
+        return [
+            ...baseTypes,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // docx
+            "application/msword", // doc
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // xlsx
+            "application/vnd.ms-excel", // xls
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation", // pptx
+            "application/vnd.ms-powerpoint", // ppt
+            "application/vnd.oasis.opendocument.text", // odt
+            "application/vnd.oasis.opendocument.spreadsheet", // ods
+            "application/vnd.oasis.opendocument.presentation", // odp
+            "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"
+        ];
+    }
+
+    return baseTypes;
+});
+
+ipcMain.handle("GET_CAPABILITIES", async () => {
+    return {
+        version: "1.0.0",
+        supportsImages: true,
+        supportsPDF: true,
+        supportsDocuments: isLibreOfficeInstalled(),
+        libreOfficeInstalled: isLibreOfficeInstalled(),
+        supportedExtensions: isLibreOfficeInstalled()
+            ? ["jpg", "jpeg", "png", "gif", "webp", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"]
+            : ["jpg", "jpeg", "png", "gif", "webp", "pdf"]
+    };
 });
 
 /** Check if URL is a PDF */
@@ -249,7 +397,7 @@ function buildImageHtml(urls) {
 function buildPdfRenderHtml(pdfUrl) {
     // Escape single quotes in URL for JavaScript string
     const escapedUrl = pdfUrl.replace(/'/g, "\\'");
-    
+
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -358,10 +506,10 @@ async function printJob(job) {
         console.log(`URL ${i}: ${url} -> isDocument: ${isDoc}`);
         return isDoc;
     });
-    
+
     console.log("Has documents:", hasDocuments);
     console.log("LibreOffice installed:", isLibreOfficeInstalled());
-    
+
     if (hasDocuments && !isLibreOfficeInstalled()) {
         const errorMsg = "LibreOffice Required\n\nTo print Word or Excel files, please install LibreOffice.\n\nDownload: https://www.libreoffice.org/download/";
         dialog.showErrorBox("LibreOffice Required", errorMsg);
@@ -420,30 +568,36 @@ async function printJob(job) {
         for (let q = 0; q < qty; q++) {
             for (let i = 0; i < urls.length; i++) {
                 let url = urls[i];
-                let tempFilePath = null;
+                let tempFilePaths = []; // Track all temp files for this iteration
                 let isConvertedDocument = false;
 
                 // 📄 Handle documents (DOCX, XLSX, etc.) - Convert to PDF first
                 if (isDocument(job, url, i)) {
                     console.log("🛠 Document detected, converting to PDF:", url);
-                    
+
                     try {
                         // Download the document
                         const ext = url.match(/\.(docx?|xlsx?|pptx?|odt|ods|odp)($|[?#])/i)?.[1] || "docx";
-                        const downloadPath = path.join(tempDir, `document-${i}.${ext}`);
+                        const downloadPath = path.join(tempDir, `document-${q}-${i}.${ext}`);
                         console.log("Downloading document to:", downloadPath);
                         await downloadFile(url, downloadPath);
-                        
+                        tempFilePaths.push(downloadPath);
+
                         // Convert to PDF using LibreOffice
                         console.log("Converting to PDF with LibreOffice...");
                         const pdfPath = await convertToPDF(downloadPath, tempDir);
                         console.log("Converted to PDF:", pdfPath);
-                        
-                        // Update URL to point to converted PDF
-                        url = "file://" + pdfPath;
-                        tempFilePath = downloadPath; // Mark for cleanup
+                        tempFilePaths.push(pdfPath);
+
+                        // Read the PDF file and convert to base64 data URL
+                        console.log("Reading PDF file for data URL conversion...");
+                        const pdfBuffer = fs.readFileSync(pdfPath);
+                        const base64Pdf = pdfBuffer.toString('base64');
+                        url = `data:application/pdf;base64,${base64Pdf}`;
+                        console.log("Converted to data URL, size:", Math.round(base64Pdf.length / 1024), "KB");
+
                         isConvertedDocument = true; // Flag that this was converted
-                        
+
                         // Now treat it as a PDF for printing
                     } catch (conversionError) {
                         console.error("Document conversion failed:", conversionError);
@@ -562,7 +716,7 @@ async function printJob(job) {
         }
 
         printWindow.close();
-        
+
         // Cleanup temporary files
         try {
             if (fs.existsSync(tempDir)) {
@@ -574,7 +728,7 @@ async function printJob(job) {
         }
     } catch (error) {
         printWindow.close();
-        
+
         // Cleanup temporary files on error
         try {
             if (fs.existsSync(tempDir)) {
@@ -583,7 +737,7 @@ async function printJob(job) {
         } catch (cleanupError) {
             console.warn("Failed to cleanup temp directory:", cleanupError);
         }
-        
+
         throw error;
     }
 }
