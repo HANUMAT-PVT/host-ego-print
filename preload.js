@@ -1,5 +1,9 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+// Store progress callbacks
+let printProgressCallbacks = new Map();
+let printJobIdCounter = 0;
+
 contextBridge.exposeInMainWorld("hostego", {
     /** Returns list of printers: { name, displayName, description, status, isDefault } */
     getPrinters: () => ipcRenderer.invoke("GET_PRINTERS"),
@@ -12,10 +16,41 @@ contextBridge.exposeInMainWorld("hostego", {
      *   deviceName?: string    – printer name (or use printerName)
      *   printerName?: string   – alias for deviceName
      *   file_types?: string[]  – optional, same length as images_urls; e.g. 'image','pdf','doc','docx','xls','xlsx' – improves file type detection
+     *   onProgress?: (progress) => void  – optional callback for print progress
      * }
      * Returns { success, message? } or { success: false, error }
+     * 
+     * Progress callback receives: { fileIndex, totalFiles, status, message, url }
+     * status: 'downloading' | 'converting' | 'rendering' | 'printing' | 'completed' | 'error'
      */
-    print: (options) => ipcRenderer.invoke("PRINT_JOB", options),
+    print: (options) => {
+        const jobId = ++printJobIdCounter;
+        const { onProgress, ...printOptions } = options;
+        
+        // Store progress callback if provided
+        if (onProgress && typeof onProgress === 'function') {
+            printProgressCallbacks.set(jobId, onProgress);
+            
+            // Listen for progress events
+            const progressListener = (_event, progress) => {
+                if (progress.jobId === jobId && printProgressCallbacks.has(jobId)) {
+                    const callback = printProgressCallbacks.get(jobId);
+                    callback(progress);
+                    
+                    // Remove callback if job is completed or errored
+                    if (progress.status === 'completed' || progress.status === 'error') {
+                        printProgressCallbacks.delete(jobId);
+                        ipcRenderer.removeListener('PRINT_PROGRESS', progressListener);
+                    }
+                }
+            };
+            
+            ipcRenderer.on('PRINT_PROGRESS', progressListener);
+        }
+        
+        // Send print job with jobId
+        return ipcRenderer.invoke("PRINT_JOB", { ...printOptions, _jobId: jobId });
+    },
     
     /**
      * Get supported file types for printing

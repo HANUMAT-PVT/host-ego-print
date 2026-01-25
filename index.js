@@ -53,12 +53,19 @@ function isDocument(job, url, index) {
     if (ft) {
         const docTypes = ["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"];
         for (const type of docTypes) {
-            if (ft === type || ft.includes(type)) return true;
+            if (ft === type || ft.includes(type)) {
+                console.log(`Document detected via file_type: ${ft} (matches ${type})`);
+                return true;
+            }
         }
     }
 
     // Fallback to URL extension check
-    return isDocumentUrl(url);
+    const isDocByUrl = isDocumentUrl(url);
+    if (isDocByUrl) {
+        console.log(`Document detected via URL extension: ${url}`);
+    }
+    return isDocByUrl;
 }
 
 /** Download file from URL */
@@ -305,12 +312,37 @@ ipcMain.handle("GET_PRINTERS", async () => {
     return [];
 });
 
-ipcMain.handle("PRINT_JOB", async (_event, job) => {
+ipcMain.handle("PRINT_JOB", async (event, job) => {
+    const jobId = job._jobId || Date.now();
+    const { _jobId, ...printJobData } = job;
+    
+    // Helper to send progress updates
+    const sendProgress = (progress) => {
+        if (event.sender && !event.sender.isDestroyed()) {
+            event.sender.send('PRINT_PROGRESS', {
+                jobId,
+                ...progress
+            });
+        }
+    };
+    
     try {
-        await printJob(job);
+        await printJob(printJobData, sendProgress);
+        sendProgress({
+            fileIndex: -1,
+            totalFiles: printJobData.images_urls?.length || 0,
+            status: 'completed',
+            message: 'Print job completed successfully'
+        });
         return { success: true, message: "Print job completed successfully" };
     } catch (err) {
         console.error("Print failed", err);
+        sendProgress({
+            fileIndex: -1,
+            totalFiles: printJobData.images_urls?.length || 0,
+            status: 'error',
+            message: err.message
+        });
         return { success: false, error: err.message };
     }
 });
@@ -489,7 +521,7 @@ function buildPdfRenderHtml(pdfUrl) {
 </html>`;
 }
 
-async function printJob(job) {
+async function printJob(job, sendProgress = null) {
     const { images_urls, quantity, color_mode } = job;
     const deviceName = job.deviceName || job.printerName;
 
@@ -519,6 +551,17 @@ async function printJob(job) {
     const urls = images_urls;
     const qty = Math.max(1, parseInt(quantity, 10) || 1);
     const isColor = String(color_mode || "color").toLowerCase() === "color";
+    const totalFiles = urls.length;
+
+    // Log file type summary
+    console.log("=== FILE TYPE ANALYSIS ===");
+    urls.forEach((url, idx) => {
+        const isDoc = isDocument(job, url, idx);
+        const isPdfFile = isPdf(job, url, idx);
+        const fileType = job.file_types?.[idx] || 'unknown';
+        console.log(`File ${idx + 1}: type=${fileType}, isDoc=${isDoc}, isPdf=${isPdfFile}, url=${url.substring(0, 60)}...`);
+    });
+    console.log("==========================");
 
     // Create temporary directory for document conversions
     const tempDir = path.join(app.getPath("temp"), "hostego-print-" + Date.now());
@@ -571,8 +614,31 @@ async function printJob(job) {
                 let tempFilePaths = []; // Track all temp files for this iteration
                 let isConvertedDocument = false;
 
+                // Determine file type
+                const isDoc = isDocument(job, url, i);
+                const isPdfFileOriginal = isPdf(job, url, i);
+                const isImageFile = !isDoc && !isPdfFileOriginal;
+                
+                console.log(`File ${i + 1}: URL=${url.substring(0, 50)}... | isDoc=${isDoc} | isPdf=${isPdfFile} | isImage=${isImageFile}`);
+
+                // Send progress: Starting file
+                if (sendProgress) {
+                    let fileTypeLabel = 'file';
+                    if (isDoc) fileTypeLabel = 'document';
+                    else if (isPdfFile) fileTypeLabel = 'PDF';
+                    else if (isImageFile) fileTypeLabel = 'image';
+                    
+                    sendProgress({
+                        fileIndex: i,
+                        totalFiles: totalFiles,
+                        status: 'downloading',
+                        message: `Processing ${fileTypeLabel} ${i + 1} of ${totalFiles}...`,
+                        url: url
+                    });
+                }
+
                 // 📄 Handle documents (DOCX, XLSX, etc.) - Convert to PDF first
-                if (isDocument(job, url, i)) {
+                if (isDoc) {
                     console.log("🛠 Document detected, converting to PDF:", url);
 
                     try {
@@ -580,11 +646,33 @@ async function printJob(job) {
                         const ext = url.match(/\.(docx?|xlsx?|pptx?|odt|ods|odp)($|[?#])/i)?.[1] || "docx";
                         const downloadPath = path.join(tempDir, `document-${q}-${i}.${ext}`);
                         console.log("Downloading document to:", downloadPath);
+                        
+                        if (sendProgress) {
+                            sendProgress({
+                                fileIndex: i,
+                                totalFiles: totalFiles,
+                                status: 'downloading',
+                                message: `Downloading document ${i + 1} of ${totalFiles}...`,
+                                url: url
+                            });
+                        }
+                        
                         await downloadFile(url, downloadPath);
                         tempFilePaths.push(downloadPath);
 
                         // Convert to PDF using LibreOffice
                         console.log("Converting to PDF with LibreOffice...");
+                        
+                        if (sendProgress) {
+                            sendProgress({
+                                fileIndex: i,
+                                totalFiles: totalFiles,
+                                status: 'converting',
+                                message: `Converting document ${i + 1} of ${totalFiles} to PDF...`,
+                                url: url
+                            });
+                        }
+                        
                         const pdfPath = await convertToPDF(downloadPath, tempDir);
                         console.log("Converted to PDF:", pdfPath);
                         tempFilePaths.push(pdfPath);
@@ -601,13 +689,38 @@ async function printJob(job) {
                         // Now treat it as a PDF for printing
                     } catch (conversionError) {
                         console.error("Document conversion failed:", conversionError);
+                        if (sendProgress) {
+                            sendProgress({
+                                fileIndex: i,
+                                totalFiles: totalFiles,
+                                status: 'error',
+                                message: `Failed to convert document: ${conversionError.message}`,
+                                url: url
+                            });
+                        }
                         throw new Error(`Failed to convert document: ${conversionError.message}`);
                     }
                 }
 
-                if (isPdf(job, url, i) || isConvertedDocument) {
+                // Check if it's a PDF (original or converted from document)
+                // After conversion, url is a data URL, so check original URL or conversion flag
+                const isPdfFile = isConvertedDocument || isPdf(job, urls[i], i);
+                
+                console.log(`File ${i + 1} after processing: isConvertedDocument=${isConvertedDocument}, isPdfFile=${isPdfFile}`);
+                
+                if (isPdfFile) {
                     // 🎯 PDF: Use PDF.js in browser to render to canvas, then print
                     console.log("Rendering PDF with PDF.js:", url);
+
+                    if (sendProgress) {
+                        sendProgress({
+                            fileIndex: i,
+                            totalFiles: totalFiles,
+                            status: 'rendering',
+                            message: `Rendering PDF ${i + 1} of ${totalFiles}...`,
+                            url: url
+                        });
+                    }
 
                     const loadPromise = new Promise((resolve) => {
                         printWindow.webContents.once("did-finish-load", resolve);
@@ -668,12 +781,42 @@ async function printJob(job) {
 
                     if (targetPrinter) printOpts.deviceName = targetPrinter;
 
+                    if (sendProgress) {
+                        sendProgress({
+                            fileIndex: i,
+                            totalFiles: totalFiles,
+                            status: 'printing',
+                            message: `Printing file ${i + 1} of ${totalFiles}...`,
+                            url: url
+                        });
+                    }
+
                     console.log("Printing PDF...");
                     await doPrint(printWindow.webContents, printOpts);
                     console.log("PDF printed successfully");
+                    
+                    if (sendProgress) {
+                        sendProgress({
+                            fileIndex: i,
+                            totalFiles: totalFiles,
+                            status: 'completed',
+                            message: `File ${i + 1} of ${totalFiles} printed successfully`,
+                            url: url
+                        });
+                    }
 
                 } else {
                     // Regular image printing
+                    if (sendProgress) {
+                        sendProgress({
+                            fileIndex: i,
+                            totalFiles: totalFiles,
+                            status: 'rendering',
+                            message: `Loading image ${i + 1} of ${totalFiles}...`,
+                            url: url
+                        });
+                    }
+
                     const loadPromise = new Promise((resolve) => {
                         printWindow.webContents.once("did-finish-load", resolve);
                     });
@@ -710,7 +853,27 @@ async function printJob(job) {
                     };
                     if (targetPrinter) printOpts.deviceName = targetPrinter;
 
+                    if (sendProgress) {
+                        sendProgress({
+                            fileIndex: i,
+                            totalFiles: totalFiles,
+                            status: 'printing',
+                            message: `Printing image ${i + 1} of ${totalFiles}...`,
+                            url: url
+                        });
+                    }
+
                     await doPrint(printWindow.webContents, printOpts);
+                    
+                    if (sendProgress) {
+                        sendProgress({
+                            fileIndex: i,
+                            totalFiles: totalFiles,
+                            status: 'completed',
+                            message: `File ${i + 1} of ${totalFiles} printed successfully`,
+                            url: url
+                        });
+                    }
                 }
             }
         }
