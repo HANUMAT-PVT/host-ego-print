@@ -101,9 +101,7 @@
             <p>Enter a document URL (DOCX, XLSX, etc.):</p>
             <input type="text" id="docUrl" placeholder="https://example.com/document.docx" />
             
-            <p>Or try a test document:</p>
-            <button onclick="testDocxPrint()">Test DOCX Print</button>
-            <button onclick="testXlsxPrint()">Test XLSX Print</button>
+            <p>Or try a test file:</p>
             <button onclick="testPdfPrint()">Test PDF Print</button>
             <button onclick="testCustomUrl()">Test Custom URL</button>
             
@@ -148,8 +146,6 @@
                 html += '<strong>Version:</strong> ' + caps.version + '<br>';
                 html += '<strong>Supports Images:</strong> ' + (caps.supportsImages ? '✅' : '❌') + '<br>';
                 html += '<strong>Supports PDF:</strong> ' + (caps.supportsPDF ? '✅' : '❌') + '<br>';
-                html += '<strong>Supports Documents:</strong> ' + (caps.supportsDocuments ? '✅' : '❌') + '<br>';
-                html += '<strong>LibreOffice Installed:</strong> ' + (caps.libreOfficeInstalled ? '✅' : '❌') + '<br>';
                 html += '<strong>Supported Extensions:</strong> ' + caps.supportedExtensions.join(', ') + '<br>';
                 html += '</div>';
                 
@@ -198,22 +194,6 @@
                 resultDiv.innerHTML = '<div class="error">❌ Error: ' + err.message + '</div>';
                 log('ERROR: ' + err.message, 'error');
             }
-        }
-
-        function testDocxPrint() {
-            // Sample DOCX file - will be converted to PDF via LibreOffice
-            const url = 'https://calibre-ebook.com/downloads/demos/demo.docx';
-            log('Testing DOCX print with sample file');
-            log('Note: This will download the DOCX, convert to PDF via LibreOffice, then print');
-            printDocument(url, 'docx');
-        }
-
-        function testXlsxPrint() {
-            // Sample XLSX file - will be converted to PDF via LibreOffice
-            const url = 'https://file-examples.com/storage/fe2e0f7a3fbb51e24286520/2017/02/file_example_XLSX_10.xlsx';
-            log('Testing XLSX print with sample file');
-            log('Note: This will download the XLSX, convert to PDF via LibreOffice, then print');
-            printDocument(url, 'xlsx');
         }
 
         function testPdfPrint() {

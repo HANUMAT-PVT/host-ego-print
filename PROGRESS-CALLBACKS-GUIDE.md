@@ -23,8 +23,6 @@ Each progress event contains:
 
 ### Status Values
 
-- `'downloading'` - Downloading document file (DOCX, XLSX, etc.)
-- `'converting'` - Converting document to PDF using LibreOffice
 - `'rendering'` - Rendering PDF/image for printing
 - `'printing'` - Sending to printer
 - `'completed'` - File printed successfully

@@ -1,9 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog, Menu } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const { execFile } = require("child_process");
-const https = require("https");
-const http = require("http");
 
 // Mitigate Windows cache errors
 if (process.platform === "win32") {
@@ -18,138 +15,6 @@ if (process.platform === "win32") {
 }
 
 let mainWindow;
-
-// LibreOffice paths
-const LIBRE_OFFICE_PATHS = {
-    win32: "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
-    darwin: "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-    linux: "/usr/bin/soffice"
-};
-
-/** Check if LibreOffice is installed */
-function isLibreOfficeInstalled() {
-    const libreOfficePath = LIBRE_OFFICE_PATHS[process.platform];
-    if (!libreOfficePath) return false;
-    return fs.existsSync(libreOfficePath);
-}
-
-/** Get LibreOffice executable path */
-function getLibreOfficePath() {
-    return LIBRE_OFFICE_PATHS[process.platform];
-}
-
-/** Check if URL is a document file */
-function isDocumentUrl(url) {
-    return /\.(docx?|xlsx?|pptx?|odt|ods|odp)($|[?#])/i.test(String(url || ""));
-}
-
-/** Check if file is a document based on job metadata or URL */
-function isDocument(job, url, index) {
-    const ft = job.file_types && Array.isArray(job.file_types)
-        ? String(job.file_types[index] || "").toLowerCase()
-        : "";
-
-    // Check explicit file type
-    if (ft) {
-        const docTypes = ["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"];
-        for (const type of docTypes) {
-            if (ft === type || ft.includes(type)) {
-                console.log(`Document detected via file_type: ${ft} (matches ${type})`);
-                return true;
-            }
-        }
-    }
-
-    // Fallback to URL extension check
-    const isDocByUrl = isDocumentUrl(url);
-    if (isDocByUrl) {
-        console.log(`Document detected via URL extension: ${url}`);
-    }
-    return isDocByUrl;
-}
-
-/** Download file from URL */
-function downloadFile(url, destPath) {
-    return new Promise((resolve, reject) => {
-        const protocol = url.startsWith("https") ? https : http;
-        const file = fs.createWriteStream(destPath);
-
-        const handleResponse = (response) => {
-            // Handle redirects
-            if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307 || response.statusCode === 308) {
-                file.close();
-                fs.unlinkSync(destPath);
-                const redirectUrl = response.headers.location;
-                console.log("Following redirect to:", redirectUrl);
-                return downloadFile(redirectUrl, destPath).then(resolve).catch(reject);
-            }
-
-            if (response.statusCode !== 200) {
-                file.close();
-                if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-                return reject(new Error(`Download failed with status: ${response.statusCode}`));
-            }
-
-            response.pipe(file);
-
-            file.on("finish", () => {
-                file.close();
-                console.log("Download completed:", destPath);
-                resolve(destPath);
-            });
-
-            file.on("error", (err) => {
-                file.close();
-                if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-                reject(err);
-            });
-        };
-
-        protocol.get(url, handleResponse).on("error", (err) => {
-            file.close();
-            if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-            reject(err);
-        });
-    });
-}
-
-/** Convert document to PDF using LibreOffice */
-function convertToPDF(inputPath, outputDir) {
-    return new Promise((resolve, reject) => {
-        const libreOfficePath = getLibreOfficePath();
-
-        execFile(
-            libreOfficePath,
-            [
-                "--headless",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                outputDir,
-                inputPath,
-            ],
-            (err, stdout, stderr) => {
-                if (err) {
-                    console.error("LibreOffice conversion error:", err);
-                    console.error("stderr:", stderr);
-                    return reject(new Error(`Conversion failed: ${err.message}`));
-                }
-
-                const pdfPath = path.join(
-                    outputDir,
-                    path.basename(inputPath).replace(/\.(docx?|xlsx?|pptx?|odt|ods|odp)$/i, ".pdf")
-                );
-
-                // Check if PDF was created
-                if (!fs.existsSync(pdfPath)) {
-                    return reject(new Error("PDF conversion failed - output file not found"));
-                }
-
-                resolve(pdfPath);
-            }
-        );
-    });
-}
 
 /** Get printer list */
 async function getPrintersList(webContents) {
@@ -209,15 +74,10 @@ function createWindow() {
                     // Store capabilities globally so web app can check
                     window.hostegoCapabilities = caps;
                     
-                    // Notify the page that we support documents
-                    if (caps.supportsDocuments) {
-                        console.log('%c✅ Document printing enabled (LibreOffice detected)', 'color: #4CAF50;');
-                        
-                        // Dispatch event for web app to listen to
-                        window.dispatchEvent(new CustomEvent('hostego:capabilities', { 
-                            detail: caps 
-                        }));
-                    }
+                    // Dispatch event for web app to listen to
+                    window.dispatchEvent(new CustomEvent('hostego:capabilities', { 
+                        detail: caps 
+                    }));
                     
                     // Override the print function to log what's being sent
                     if (window.hostego && window.hostego.print) {
@@ -280,24 +140,7 @@ function createWindow() {
         },
         {
             label: 'Help',
-            submenu: [
-                {
-                    label: 'Check LibreOffice',
-                    click: () => {
-                        const installed = isLibreOfficeInstalled();
-                        const message = installed
-                            ? 'LibreOffice is installed and ready!\n\nPath: ' + getLibreOfficePath()
-                            : 'LibreOffice is NOT installed.\n\nPlease install it to print documents.\n\nDownload: https://www.libreoffice.org/download/';
-
-                        dialog.showMessageBox({
-                            type: installed ? 'info' : 'warning',
-                            title: 'LibreOffice Status',
-                            message: message,
-                            buttons: ['OK']
-                        });
-                    }
-                }
-            ]
+            submenu: []
         }
     ];
 
@@ -348,29 +191,10 @@ ipcMain.handle("PRINT_JOB", async (event, job) => {
 });
 
 ipcMain.handle("GET_SUPPORTED_FILE_TYPES", async () => {
-    const baseTypes = [
+    return [
         "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp",
         "application/pdf", "pdf"
     ];
-
-    // Add document types if LibreOffice is installed
-    if (isLibreOfficeInstalled()) {
-        return [
-            ...baseTypes,
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // docx
-            "application/msword", // doc
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // xlsx
-            "application/vnd.ms-excel", // xls
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation", // pptx
-            "application/vnd.ms-powerpoint", // ppt
-            "application/vnd.oasis.opendocument.text", // odt
-            "application/vnd.oasis.opendocument.spreadsheet", // ods
-            "application/vnd.oasis.opendocument.presentation", // odp
-            "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"
-        ];
-    }
-
-    return baseTypes;
 });
 
 ipcMain.handle("GET_CAPABILITIES", async () => {
@@ -378,11 +202,9 @@ ipcMain.handle("GET_CAPABILITIES", async () => {
         version: "1.0.0",
         supportsImages: true,
         supportsPDF: true,
-        supportsDocuments: isLibreOfficeInstalled(),
-        libreOfficeInstalled: isLibreOfficeInstalled(),
-        supportedExtensions: isLibreOfficeInstalled()
-            ? ["jpg", "jpeg", "png", "gif", "webp", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"]
-            : ["jpg", "jpeg", "png", "gif", "webp", "pdf"]
+        supportsDocuments: false,
+        libreOfficeInstalled: false,
+        supportedExtensions: ["jpg", "jpeg", "png", "gif", "webp", "pdf"]
     };
 });
 
@@ -532,27 +354,11 @@ async function printJob(job, sendProgress = null) {
         throw new Error("images_urls is required and must be a non-empty array.");
     }
 
-    // Check if any URL is a document and LibreOffice is required
-    const hasDocuments = images_urls.some((url, i) => {
-        const isDoc = isDocument(job, url, i);
-        console.log(`URL ${i}: ${url} -> isDocument: ${isDoc}`);
-        return isDoc;
-    });
-
-    console.log("Has documents:", hasDocuments);
-    console.log("LibreOffice installed:", isLibreOfficeInstalled());
-
-    if (hasDocuments && !isLibreOfficeInstalled()) {
-        const errorMsg = "LibreOffice Required\n\nTo print Word or Excel files, please install LibreOffice.\n\nDownload: https://www.libreoffice.org/download/";
-        dialog.showErrorBox("LibreOffice Required", errorMsg);
-        throw new Error("LibreOffice is not installed. Please install it to print documents.");
-    }
-
     const urls = images_urls;
     // Files are already expanded by quantity, so each file should be printed once
     // quantity parameter is now ignored since files are pre-expanded
     const totalFiles = urls.length;
-    
+
     // Support per-file color_mode via color_modes array
     // If color_modes array is provided, use it; otherwise fall back to global color_mode or default
     const getFileColorMode = (index) => {
@@ -565,18 +371,11 @@ async function printJob(job, sendProgress = null) {
     // Log file type summary
     console.log("=== FILE TYPE ANALYSIS ===");
     urls.forEach((url, idx) => {
-        const isDoc = isDocument(job, url, idx);
         const isPdfFile = isPdf(job, url, idx);
         const fileType = job.file_types?.[idx] || 'unknown';
-        console.log(`File ${idx + 1}: type=${fileType}, isDoc=${isDoc}, isPdf=${isPdfFile}, url=${url.substring(0, 60)}...`);
+        console.log(`File ${idx + 1}: type=${fileType}, isPdf=${isPdfFile}, url=${url.substring(0, 60)}...`);
     });
     console.log("==========================");
-
-    // Create temporary directory for document conversions
-    const tempDir = path.join(app.getPath("temp"), "hostego-print-" + Date.now());
-    if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-    }
 
     // Create print window - visible for proper rendering
     const printWindow = new BrowserWindow({
@@ -620,139 +419,61 @@ async function printJob(job, sendProgress = null) {
         // Files are already expanded by quantity, so print each file once
         for (let i = 0; i < urls.length; i++) {
             let url = urls[i];
-            let tempFilePaths = []; // Track all temp files for this iteration
-            let isConvertedDocument = false;
-            
+
             // Get color mode for this specific file
             const fileColorMode = getFileColorMode(i);
             const isColor = fileColorMode === "color";
-            
+
             console.log(`File ${i + 1}/${totalFiles}: color_mode=${fileColorMode}, isColor=${isColor}`);
 
-                // Determine file type
-                const isDoc = isDocument(job, url, i);
-                const isPdfFileOriginal = isPdf(job, url, i);
-                const isImageFile = !isDoc && !isPdfFileOriginal;
+            // Determine file type
+            const isPdfFile = isPdf(job, url, i);
+            const isImageFile = !isPdfFile;
 
-                console.log(`File ${i + 1}: URL=${url.substring(0, 50)}... | isDoc=${isDoc} | isPdf=${isPdfFileOriginal} | isImage=${isImageFile}`);
+            console.log(`File ${i + 1}: URL=${url.substring(0, 50)}... | isPdf=${isPdfFile} | isImage=${isImageFile}`);
 
-                // Send progress: Starting file
+            // Send progress: Starting file
+            if (sendProgress) {
+                let fileTypeLabel = isPdfFile ? 'PDF' : 'image';
+                sendProgress({
+                    fileIndex: i,
+                    totalFiles: totalFiles,
+                    status: 'rendering',
+                    message: `Processing ${fileTypeLabel} ${i + 1} of ${totalFiles}...`,
+                    url: url
+                });
+            }
+
+            if (isPdfFile) {
+                // 🎯 PDF: Use PDF.js in browser to render to canvas, then print
+                console.log("Rendering PDF with PDF.js:", url);
+
                 if (sendProgress) {
-                    let fileTypeLabel = 'file';
-                    if (isDoc) fileTypeLabel = 'document';
-                    else if (isPdfFileOriginal) fileTypeLabel = 'PDF';
-                    else if (isImageFile) fileTypeLabel = 'image';
-
                     sendProgress({
                         fileIndex: i,
                         totalFiles: totalFiles,
-                        status: 'downloading',
-                        message: `Processing ${fileTypeLabel} ${i + 1} of ${totalFiles}...`,
+                        status: 'rendering',
+                        message: `Rendering PDF ${i + 1} of ${totalFiles}...`,
                         url: url
                     });
                 }
 
-                // 📄 Handle documents (DOCX, XLSX, etc.) - Convert to PDF first
-                if (isDoc) {
-                    console.log("🛠 Document detected, converting to PDF:", url);
+                const loadPromise = new Promise((resolve) => {
+                    printWindow.webContents.once("did-finish-load", resolve);
+                });
 
-                    try {
-                        // Download the document
-                        const ext = url.match(/\.(docx?|xlsx?|pptx?|odt|ods|odp)($|[?#])/i)?.[1] || "docx";
-                        const downloadPath = path.join(tempDir, `document-${i}.${ext}`);
-                        console.log("Downloading document to:", downloadPath);
+                // Load HTML that uses PDF.js to render PDF to canvas
+                const html = buildPdfRenderHtml(url);
+                await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
 
-                        if (sendProgress) {
-                            sendProgress({
-                                fileIndex: i,
-                                totalFiles: totalFiles,
-                                status: 'downloading',
-                                message: `Downloading document ${i + 1} of ${totalFiles}...`,
-                                url: url
-                            });
-                        }
+                await Promise.race([
+                    loadPromise,
+                    new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 30000)),
+                ]);
 
-                        await downloadFile(url, downloadPath);
-                        tempFilePaths.push(downloadPath);
-
-                        // Convert to PDF using LibreOffice
-                        console.log("Converting to PDF with LibreOffice...");
-
-                        if (sendProgress) {
-                            sendProgress({
-                                fileIndex: i,
-                                totalFiles: totalFiles,
-                                status: 'converting',
-                                message: `Converting document ${i + 1} of ${totalFiles} to PDF...`,
-                                url: url
-                            });
-                        }
-
-                        const pdfPath = await convertToPDF(downloadPath, tempDir);
-                        console.log("Converted to PDF:", pdfPath);
-                        tempFilePaths.push(pdfPath);
-
-                        // Read the PDF file and convert to base64 data URL
-                        console.log("Reading PDF file for data URL conversion...");
-                        const pdfBuffer = fs.readFileSync(pdfPath);
-                        const base64Pdf = pdfBuffer.toString('base64');
-                        url = `data:application/pdf;base64,${base64Pdf}`;
-                        console.log("Converted to data URL, size:", Math.round(base64Pdf.length / 1024), "KB");
-
-                        isConvertedDocument = true; // Flag that this was converted
-
-                        // Now treat it as a PDF for printing
-                    } catch (conversionError) {
-                        console.error("Document conversion failed:", conversionError);
-                        if (sendProgress) {
-                            sendProgress({
-                                fileIndex: i,
-                                totalFiles: totalFiles,
-                                status: 'error',
-                                message: `Failed to convert document: ${conversionError.message}`,
-                                url: url
-                            });
-                        }
-                        throw new Error(`Failed to convert document: ${conversionError.message}`);
-                    }
-                }
-
-                // Check if it's a PDF (original or converted from document)
-                // After conversion, url is a data URL, so check original URL or conversion flag
-                const isPdfFile = isConvertedDocument || isPdf(job, urls[i], i);
-
-                console.log(`File ${i + 1} after processing: isConvertedDocument=${isConvertedDocument}, isPdfFile=${isPdfFile}`);
-
-                if (isPdfFile) {
-                    // 🎯 PDF: Use PDF.js in browser to render to canvas, then print
-                    console.log("Rendering PDF with PDF.js:", url);
-
-                    if (sendProgress) {
-                        sendProgress({
-                            fileIndex: i,
-                            totalFiles: totalFiles,
-                            status: 'rendering',
-                            message: `Rendering PDF ${i + 1} of ${totalFiles}...`,
-                            url: url
-                        });
-                    }
-
-                    const loadPromise = new Promise((resolve) => {
-                        printWindow.webContents.once("did-finish-load", resolve);
-                    });
-
-                    // Load HTML that uses PDF.js to render PDF to canvas
-                    const html = buildPdfRenderHtml(url);
-                    await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-
-                    await Promise.race([
-                        loadPromise,
-                        new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 30000)),
-                    ]);
-
-                    // Wait for PDF.js to finish rendering
-                    console.log("Waiting for PDF.js to render...");
-                    await printWindow.webContents.executeJavaScript(`
+                // Wait for PDF.js to finish rendering
+                console.log("Waiting for PDF.js to render...");
+                await printWindow.webContents.executeJavaScript(`
                         new Promise((resolve, reject) => {
                             let checks = 0;
                             const check = () => {
@@ -771,80 +492,80 @@ async function printJob(job, sendProgress = null) {
                         });
                     `);
 
-                    // Extra wait for canvas rendering to complete
-                    await new Promise((r) => setTimeout(r, 1000));
+                // Extra wait for canvas rendering to complete
+                await new Promise((r) => setTimeout(r, 1000));
 
-                    // Print
-                    const printOpts = {
-                        silent: true,
-                        printBackground: true,
-                        color: isColor,
-                        copies: 1,
-                        deviceName: targetPrinter,
+                // Print
+                const printOpts = {
+                    silent: true,
+                    printBackground: true,
+                    color: isColor,
+                    copies: 1,
+                    deviceName: targetPrinter,
 
-                        margins: {
-                            marginType: "none",
-                        },
+                    margins: {
+                        marginType: "none",
+                    },
 
-                        pageSize: {
-                            width: 210000,   // microns
-                            height: 297000,
-                        },
+                    pageSize: {
+                        width: 210000,   // microns
+                        height: 297000,
+                    },
 
-                        scaleFactor: 100,
-                    };
+                    scaleFactor: 100,
+                };
 
-                    if (targetPrinter) printOpts.deviceName = targetPrinter;
+                if (targetPrinter) printOpts.deviceName = targetPrinter;
 
-                    if (sendProgress) {
-                        sendProgress({
-                            fileIndex: i,
-                            totalFiles: totalFiles,
-                            status: 'printing',
-                            message: `Printing file ${i + 1} of ${totalFiles}...`,
-                            url: url
-                        });
-                    }
-
-                    console.log("Printing PDF...");
-                    await doPrint(printWindow.webContents, printOpts);
-                    console.log("PDF printed successfully");
-
-                    if (sendProgress) {
-                        sendProgress({
-                            fileIndex: i,
-                            totalFiles: totalFiles,
-                            status: 'completed',
-                            message: `File ${i + 1} of ${totalFiles} printed successfully`,
-                            url: url
-                        });
-                    }
-
-                } else {
-                    // Regular image printing
-                    if (sendProgress) {
-                        sendProgress({
-                            fileIndex: i,
-                            totalFiles: totalFiles,
-                            status: 'rendering',
-                            message: `Loading image ${i + 1} of ${totalFiles}...`,
-                            url: url
-                        });
-                    }
-
-                    const loadPromise = new Promise((resolve) => {
-                        printWindow.webContents.once("did-finish-load", resolve);
+                if (sendProgress) {
+                    sendProgress({
+                        fileIndex: i,
+                        totalFiles: totalFiles,
+                        status: 'printing',
+                        message: `Printing file ${i + 1} of ${totalFiles}...`,
+                        url: url
                     });
+                }
 
-                    const html = buildImageHtml([url]);
-                    await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+                console.log("Printing PDF...");
+                await doPrint(printWindow.webContents, printOpts);
+                console.log("PDF printed successfully");
 
-                    await Promise.race([
-                        loadPromise,
-                        new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 15000)),
-                    ]);
+                if (sendProgress) {
+                    sendProgress({
+                        fileIndex: i,
+                        totalFiles: totalFiles,
+                        status: 'completed',
+                        message: `File ${i + 1} of ${totalFiles} printed successfully`,
+                        url: url
+                    });
+                }
 
-                    await printWindow.webContents.executeJavaScript(`
+            } else {
+                // Regular image printing
+                if (sendProgress) {
+                    sendProgress({
+                        fileIndex: i,
+                        totalFiles: totalFiles,
+                        status: 'rendering',
+                        message: `Loading image ${i + 1} of ${totalFiles}...`,
+                        url: url
+                    });
+                }
+
+                const loadPromise = new Promise((resolve) => {
+                    printWindow.webContents.once("did-finish-load", resolve);
+                });
+
+                const html = buildImageHtml([url]);
+                await printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+
+                await Promise.race([
+                    loadPromise,
+                    new Promise((_, rej) => setTimeout(() => rej(new Error("Load timed out")), 15000)),
+                ]);
+
+                await printWindow.webContents.executeJavaScript(`
                         new Promise((resolve) => {
                             const imgs = document.images;
                             if (imgs.length === 0) return resolve();
@@ -856,65 +577,45 @@ async function printJob(job, sendProgress = null) {
                             }
                         });
                     `);
-                    await new Promise((r) => setTimeout(r, 300));
+                await new Promise((r) => setTimeout(r, 300));
 
-                    const printOpts = {
-                        silent: true,
-                        printBackground: true,
-                        color: isColor,
-                        copies: 1,
-                        margins: { marginType: "none" },
-                        pageSize: "A4",
-                    };
-                    if (targetPrinter) printOpts.deviceName = targetPrinter;
+                const printOpts = {
+                    silent: true,
+                    printBackground: true,
+                    color: isColor,
+                    copies: 1,
+                    margins: { marginType: "none" },
+                    pageSize: "A4",
+                };
+                if (targetPrinter) printOpts.deviceName = targetPrinter;
 
-                    if (sendProgress) {
-                        sendProgress({
-                            fileIndex: i,
-                            totalFiles: totalFiles,
-                            status: 'printing',
-                            message: `Printing image ${i + 1} of ${totalFiles}...`,
-                            url: url
-                        });
-                    }
-
-                    await doPrint(printWindow.webContents, printOpts);
-
-                    if (sendProgress) {
-                        sendProgress({
-                            fileIndex: i,
-                            totalFiles: totalFiles,
-                            status: 'completed',
-                            message: `File ${i + 1} of ${totalFiles} printed successfully`,
-                            url: url
-                        });
-                    }
+                if (sendProgress) {
+                    sendProgress({
+                        fileIndex: i,
+                        totalFiles: totalFiles,
+                        status: 'printing',
+                        message: `Printing image ${i + 1} of ${totalFiles}...`,
+                        url: url
+                    });
                 }
+
+                await doPrint(printWindow.webContents, printOpts);
+
+                if (sendProgress) {
+                    sendProgress({
+                        fileIndex: i,
+                        totalFiles: totalFiles,
+                        status: 'completed',
+                        message: `File ${i + 1} of ${totalFiles} printed successfully`,
+                        url: url
+                    });
+                }
+            }
         }
 
         printWindow.close();
-
-        // Cleanup temporary files
-        try {
-            if (fs.existsSync(tempDir)) {
-                fs.rmSync(tempDir, { recursive: true, force: true });
-                console.log("Cleaned up temporary directory");
-            }
-        } catch (cleanupError) {
-            console.warn("Failed to cleanup temp directory:", cleanupError);
-        }
     } catch (error) {
         printWindow.close();
-
-        // Cleanup temporary files on error
-        try {
-            if (fs.existsSync(tempDir)) {
-                fs.rmSync(tempDir, { recursive: true, force: true });
-            }
-        } catch (cleanupError) {
-            console.warn("Failed to cleanup temp directory:", cleanupError);
-        }
-
         throw error;
     }
 }
