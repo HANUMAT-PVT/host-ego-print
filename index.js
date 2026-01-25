@@ -315,7 +315,7 @@ ipcMain.handle("GET_PRINTERS", async () => {
 ipcMain.handle("PRINT_JOB", async (event, job) => {
     const jobId = job._jobId || Date.now();
     const { _jobId, ...printJobData } = job;
-    
+
     // Helper to send progress updates
     const sendProgress = (progress) => {
         if (event.sender && !event.sender.isDestroyed()) {
@@ -325,7 +325,7 @@ ipcMain.handle("PRINT_JOB", async (event, job) => {
             });
         }
     };
-    
+
     try {
         await printJob(printJobData, sendProgress);
         sendProgress({
@@ -522,7 +522,7 @@ function buildPdfRenderHtml(pdfUrl) {
 }
 
 async function printJob(job, sendProgress = null) {
-    const { images_urls, quantity, color_mode } = job;
+    const { images_urls, quantity, color_mode, color_modes } = job;
     const deviceName = job.deviceName || job.printerName;
 
     console.log("=== PRINT JOB START ===");
@@ -549,9 +549,18 @@ async function printJob(job, sendProgress = null) {
     }
 
     const urls = images_urls;
-    const qty = Math.max(1, parseInt(quantity, 10) || 1);
-    const isColor = String(color_mode || "color").toLowerCase() === "color";
+    // Files are already expanded by quantity, so each file should be printed once
+    // quantity parameter is now ignored since files are pre-expanded
     const totalFiles = urls.length;
+    
+    // Support per-file color_mode via color_modes array
+    // If color_modes array is provided, use it; otherwise fall back to global color_mode or default
+    const getFileColorMode = (index) => {
+        if (color_modes && Array.isArray(color_modes) && color_modes[index] !== undefined) {
+            return String(color_modes[index] || "color").toLowerCase();
+        }
+        return String(color_mode || "color").toLowerCase();
+    };
 
     // Log file type summary
     console.log("=== FILE TYPE ANALYSIS ===");
@@ -608,17 +617,23 @@ async function printJob(job, sendProgress = null) {
     try {
         const targetPrinter = await getTargetPrinter();
 
-        for (let q = 0; q < qty; q++) {
-            for (let i = 0; i < urls.length; i++) {
-                let url = urls[i];
-                let tempFilePaths = []; // Track all temp files for this iteration
-                let isConvertedDocument = false;
+        // Files are already expanded by quantity, so print each file once
+        for (let i = 0; i < urls.length; i++) {
+            let url = urls[i];
+            let tempFilePaths = []; // Track all temp files for this iteration
+            let isConvertedDocument = false;
+            
+            // Get color mode for this specific file
+            const fileColorMode = getFileColorMode(i);
+            const isColor = fileColorMode === "color";
+            
+            console.log(`File ${i + 1}/${totalFiles}: color_mode=${fileColorMode}, isColor=${isColor}`);
 
                 // Determine file type
                 const isDoc = isDocument(job, url, i);
                 const isPdfFileOriginal = isPdf(job, url, i);
                 const isImageFile = !isDoc && !isPdfFileOriginal;
-                
+
                 console.log(`File ${i + 1}: URL=${url.substring(0, 50)}... | isDoc=${isDoc} | isPdf=${isPdfFileOriginal} | isImage=${isImageFile}`);
 
                 // Send progress: Starting file
@@ -627,7 +642,7 @@ async function printJob(job, sendProgress = null) {
                     if (isDoc) fileTypeLabel = 'document';
                     else if (isPdfFileOriginal) fileTypeLabel = 'PDF';
                     else if (isImageFile) fileTypeLabel = 'image';
-                    
+
                     sendProgress({
                         fileIndex: i,
                         totalFiles: totalFiles,
@@ -644,9 +659,9 @@ async function printJob(job, sendProgress = null) {
                     try {
                         // Download the document
                         const ext = url.match(/\.(docx?|xlsx?|pptx?|odt|ods|odp)($|[?#])/i)?.[1] || "docx";
-                        const downloadPath = path.join(tempDir, `document-${q}-${i}.${ext}`);
+                        const downloadPath = path.join(tempDir, `document-${i}.${ext}`);
                         console.log("Downloading document to:", downloadPath);
-                        
+
                         if (sendProgress) {
                             sendProgress({
                                 fileIndex: i,
@@ -656,13 +671,13 @@ async function printJob(job, sendProgress = null) {
                                 url: url
                             });
                         }
-                        
+
                         await downloadFile(url, downloadPath);
                         tempFilePaths.push(downloadPath);
 
                         // Convert to PDF using LibreOffice
                         console.log("Converting to PDF with LibreOffice...");
-                        
+
                         if (sendProgress) {
                             sendProgress({
                                 fileIndex: i,
@@ -672,7 +687,7 @@ async function printJob(job, sendProgress = null) {
                                 url: url
                             });
                         }
-                        
+
                         const pdfPath = await convertToPDF(downloadPath, tempDir);
                         console.log("Converted to PDF:", pdfPath);
                         tempFilePaths.push(pdfPath);
@@ -705,9 +720,9 @@ async function printJob(job, sendProgress = null) {
                 // Check if it's a PDF (original or converted from document)
                 // After conversion, url is a data URL, so check original URL or conversion flag
                 const isPdfFile = isConvertedDocument || isPdf(job, urls[i], i);
-                
+
                 console.log(`File ${i + 1} after processing: isConvertedDocument=${isConvertedDocument}, isPdfFile=${isPdfFile}`);
-                
+
                 if (isPdfFile) {
                     // 🎯 PDF: Use PDF.js in browser to render to canvas, then print
                     console.log("Rendering PDF with PDF.js:", url);
@@ -794,7 +809,7 @@ async function printJob(job, sendProgress = null) {
                     console.log("Printing PDF...");
                     await doPrint(printWindow.webContents, printOpts);
                     console.log("PDF printed successfully");
-                    
+
                     if (sendProgress) {
                         sendProgress({
                             fileIndex: i,
@@ -864,7 +879,7 @@ async function printJob(job, sendProgress = null) {
                     }
 
                     await doPrint(printWindow.webContents, printOpts);
-                    
+
                     if (sendProgress) {
                         sendProgress({
                             fileIndex: i,
@@ -875,7 +890,6 @@ async function printJob(job, sendProgress = null) {
                         });
                     }
                 }
-            }
         }
 
         printWindow.close();
