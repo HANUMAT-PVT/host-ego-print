@@ -619,13 +619,13 @@ async function printJob(job, sendProgress = null) {
                 const isPdfFileOriginal = isPdf(job, url, i);
                 const isImageFile = !isDoc && !isPdfFileOriginal;
                 
-                console.log(`File ${i + 1}: URL=${url.substring(0, 50)}... | isDoc=${isDoc} | isPdf=${isPdfFile} | isImage=${isImageFile}`);
+                console.log(`File ${i + 1}: URL=${url.substring(0, 50)}... | isDoc=${isDoc} | isPdf=${isPdfFileOriginal} | isImage=${isImageFile}`);
 
                 // Send progress: Starting file
                 if (sendProgress) {
                     let fileTypeLabel = 'file';
                     if (isDoc) fileTypeLabel = 'document';
-                    else if (isPdfFile) fileTypeLabel = 'PDF';
+                    else if (isPdfFileOriginal) fileTypeLabel = 'PDF';
                     else if (isImageFile) fileTypeLabel = 'image';
                     
                     sendProgress({
