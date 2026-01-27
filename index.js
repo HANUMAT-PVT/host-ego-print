@@ -172,24 +172,32 @@ ipcMain.handle("PRINT_JOB", async (event, job) => {
     // Helper to send success callback when all prints are done
     const sendSuccess = (data) => {
         if (event.sender && !event.sender.isDestroyed()) {
-            event.sender.send('PRINT_SUCCESSFULLY_DONE', {
+            const successData = {
                 jobId,
                 order_id: printJobData.order_id,
                 printerName: printJobData.deviceName,
                 ...data
-            });
+            };
+            console.log('Sending PRINT_SUCCESSFULLY_DONE event:', JSON.stringify(successData, null, 2));
+            event.sender.send('PRINT_SUCCESSFULLY_DONE', successData);
+        } else {
+            console.warn('Cannot send PRINT_SUCCESSFULLY_DONE: event.sender is destroyed or unavailable');
         }
     };
 
     // Helper to send error callback for printer errors
     const sendError = (error) => {
         if (event.sender && !event.sender.isDestroyed()) {
-            event.sender.send('PRINT_ERROR', {
+            const errorData = {
                 jobId,
                 order_id: printJobData.order_id,
                 error: error.message || error,
                 errorType: error.errorType || 'printer_error'
-            });
+            };
+            console.log('Sending PRINT_ERROR event:', JSON.stringify(errorData, null, 2));
+            event.sender.send('PRINT_ERROR', errorData);
+        } else {
+            console.warn('Cannot send PRINT_ERROR: event.sender is destroyed or unavailable');
         }
     };
 
@@ -687,6 +695,7 @@ async function printJob(job, sendProgress = null, sendSuccess = null, sendError 
         }
 
         // All files printed successfully - send success callback
+        console.log('All files printed successfully, sending success callback...');
         if (sendSuccess) {
             sendSuccess({
                 totalFiles: totalFiles,
@@ -694,6 +703,8 @@ async function printJob(job, sendProgress = null, sendSuccess = null, sendError 
                 order_id: job.order_id,
                 printerName: targetPrinter
             });
+        } else {
+            console.warn('sendSuccess callback is not available');
         }
 
         printWindow.close();

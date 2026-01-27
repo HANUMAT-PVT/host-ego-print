@@ -64,3 +64,54 @@ contextBridge.exposeInMainWorld("hostego", {
      */
     getCapabilities: () => ipcRenderer.invoke("GET_CAPABILITIES"),
 });
+
+// Expose IPC event listeners for print success and error callbacks
+contextBridge.exposeInMainWorld("electron", {
+    ipcRenderer: {
+        on: (channel, callback) => {
+            // Whitelist allowed channels for security
+            const validChannels = ['PRINT_PROGRESS', 'PRINT_SUCCESSFULLY_DONE', 'PRINT_ERROR'];
+            if (validChannels.includes(channel)) {
+                ipcRenderer.on(channel, callback);
+            } else {
+                console.warn(`Channel ${channel} is not allowed`);
+            }
+        },
+        removeListener: (channel, callback) => {
+            const validChannels = ['PRINT_PROGRESS', 'PRINT_SUCCESSFULLY_DONE', 'PRINT_ERROR'];
+            if (validChannels.includes(channel)) {
+                ipcRenderer.removeListener(channel, callback);
+            }
+        },
+        removeAllListeners: (channel) => {
+            const validChannels = ['PRINT_PROGRESS', 'PRINT_SUCCESSFULLY_DONE', 'PRINT_ERROR'];
+            if (validChannels.includes(channel)) {
+                ipcRenderer.removeAllListeners(channel);
+            }
+        }
+    }
+});
+
+// Also expose as electronAPI for compatibility
+contextBridge.exposeInMainWorld("electronAPI", {
+    on: (channel, callback) => {
+        const validChannels = ['PRINT_PROGRESS', 'PRINT_SUCCESSFULLY_DONE', 'PRINT_ERROR'];
+        if (validChannels.includes(channel)) {
+            ipcRenderer.on(channel, callback);
+        } else {
+            console.warn(`Channel ${channel} is not allowed`);
+        }
+    },
+    removeListener: (channel, callback) => {
+        const validChannels = ['PRINT_PROGRESS', 'PRINT_SUCCESSFULLY_DONE', 'PRINT_ERROR'];
+        if (validChannels.includes(channel)) {
+            ipcRenderer.removeListener(channel, callback);
+        }
+    },
+    removeAllListeners: (channel) => {
+        const validChannels = ['PRINT_PROGRESS', 'PRINT_SUCCESSFULLY_DONE', 'PRINT_ERROR'];
+        if (validChannels.includes(channel)) {
+            ipcRenderer.removeAllListeners(channel);
+        }
+    }
+});
