@@ -169,8 +169,32 @@ ipcMain.handle("PRINT_JOB", async (event, job) => {
         }
     };
 
+    // Helper to send success callback when all prints are done
+    const sendSuccess = (data) => {
+        if (event.sender && !event.sender.isDestroyed()) {
+            event.sender.send('PRINT_SUCCESSFULLY_DONE', {
+                jobId,
+                order_id: printJobData.order_id,
+                printerName: printJobData.deviceName,
+                ...data
+            });
+        }
+    };
+
+    // Helper to send error callback for printer errors
+    const sendError = (error) => {
+        if (event.sender && !event.sender.isDestroyed()) {
+            event.sender.send('PRINT_ERROR', {
+                jobId,
+                order_id: printJobData.order_id,
+                error: error.message || error,
+                errorType: error.errorType || 'printer_error'
+            });
+        }
+    };
+
     try {
-        await printJob(printJobData, sendProgress);
+        await printJob(printJobData, sendProgress, sendSuccess, sendError);
         sendProgress({
             fileIndex: -1,
             totalFiles: printJobData.images_urls?.length || 0,
@@ -180,6 +204,7 @@ ipcMain.handle("PRINT_JOB", async (event, job) => {
         return { success: true, message: "Print job completed successfully" };
     } catch (err) {
         console.error("Print failed", err);
+        sendError(err);
         sendProgress({
             fileIndex: -1,
             totalFiles: printJobData.images_urls?.length || 0,
@@ -343,8 +368,8 @@ function buildPdfRenderHtml(pdfUrl) {
 </html>`;
 }
 
-async function printJob(job, sendProgress = null) {
-    const { images_urls, quantity, color_mode, color_modes } = job;
+async function printJob(job, sendProgress = null, sendSuccess = null, sendError = null) {
+    const { images_urls, quantity, color_mode, color_modes, order_id } = job;
     const deviceName = job.deviceName || job.printerName;
 
     console.log("=== PRINT JOB START ===");
@@ -404,11 +429,42 @@ async function printJob(job, sendProgress = null) {
         return deviceName;
     }
 
-    function doPrint(contents, opts) {
+    function doPrint(contents, opts, fileIndex = -1) {
         return new Promise((resolve, reject) => {
             contents.print(opts, (success, reason) => {
-                if (success) resolve();
-                else reject(new Error(reason || "Print failed"));
+                if (success) {
+                    resolve();
+                } else {
+                    // Parse common printer error messages
+                    const errorMessage = reason || "Print failed";
+                    let errorType = 'printer_error';
+                    let userFriendlyMessage = errorMessage;
+
+                    // Check for common printer errors
+                    const lowerReason = String(errorMessage).toLowerCase();
+                    if (lowerReason.includes('paper') || lowerReason.includes('sheet') || lowerReason.includes('out of paper')) {
+                        errorType = 'no_paper';
+                        userFriendlyMessage = 'No paper/sheets present in the printer. Please add paper and try again.';
+                    } else if (lowerReason.includes('ink') || lowerReason.includes('toner') || lowerReason.includes('cartridge')) {
+                        errorType = 'no_ink';
+                        userFriendlyMessage = 'Printer ink/toner is low or empty. Please check your printer.';
+                    } else if (lowerReason.includes('offline') || lowerReason.includes('not connected')) {
+                        errorType = 'printer_offline';
+                        userFriendlyMessage = 'Printer is offline or not connected. Please check the printer connection.';
+                    } else if (lowerReason.includes('jam') || lowerReason.includes('jammed')) {
+                        errorType = 'paper_jam';
+                        userFriendlyMessage = 'Paper jam detected. Please clear the paper jam and try again.';
+                    } else if (lowerReason.includes('cover') || lowerReason.includes('open')) {
+                        errorType = 'printer_cover_open';
+                        userFriendlyMessage = 'Printer cover is open. Please close the cover and try again.';
+                    }
+
+                    const error = new Error(userFriendlyMessage);
+                    error.errorType = errorType;
+                    error.originalReason = reason;
+                    error.fileIndex = fileIndex;
+                    reject(error);
+                }
             });
         });
     }
@@ -528,17 +584,25 @@ async function printJob(job, sendProgress = null) {
                 }
 
                 console.log("Printing PDF...");
-                await doPrint(printWindow.webContents, printOpts);
-                console.log("PDF printed successfully");
+                try {
+                    await doPrint(printWindow.webContents, printOpts, i);
+                    console.log("PDF printed successfully");
 
-                if (sendProgress) {
-                    sendProgress({
-                        fileIndex: i,
-                        totalFiles: totalFiles,
-                        status: 'completed',
-                        message: `File ${i + 1} of ${totalFiles} printed successfully`,
-                        url: url
-                    });
+                    if (sendProgress) {
+                        sendProgress({
+                            fileIndex: i,
+                            totalFiles: totalFiles,
+                            status: 'completed',
+                            message: `File ${i + 1} of ${totalFiles} printed successfully`,
+                            url: url
+                        });
+                    }
+                } catch (printError) {
+                    console.error(`Print error for file ${i + 1}:`, printError);
+                    if (sendError) {
+                        sendError(printError);
+                    }
+                    throw printError; // Re-throw to stop the loop
                 }
 
             } else {
@@ -599,23 +663,43 @@ async function printJob(job, sendProgress = null) {
                     });
                 }
 
-                await doPrint(printWindow.webContents, printOpts);
+                try {
+                    await doPrint(printWindow.webContents, printOpts, i);
+                    console.log("Image printed successfully");
 
-                if (sendProgress) {
-                    sendProgress({
-                        fileIndex: i,
-                        totalFiles: totalFiles,
-                        status: 'completed',
-                        message: `File ${i + 1} of ${totalFiles} printed successfully`,
-                        url: url
-                    });
+                    if (sendProgress) {
+                        sendProgress({
+                            fileIndex: i,
+                            totalFiles: totalFiles,
+                            status: 'completed',
+                            message: `File ${i + 1} of ${totalFiles} printed successfully`,
+                            url: url
+                        });
+                    }
+                } catch (printError) {
+                    console.error(`Print error for file ${i + 1}:`, printError);
+                    if (sendError) {
+                        sendError(printError);
+                    }
+                    throw printError; // Re-throw to stop the loop
                 }
             }
+        }
+
+        // All files printed successfully - send success callback
+        if (sendSuccess) {
+            sendSuccess({
+                totalFiles: totalFiles,
+                message: `All ${totalFiles} file(s) printed successfully`,
+                order_id: job.order_id,
+                printerName: targetPrinter
+            });
         }
 
         printWindow.close();
     } catch (error) {
         printWindow.close();
+        // Error already sent via sendError in the catch blocks above
         throw error;
     }
 }
