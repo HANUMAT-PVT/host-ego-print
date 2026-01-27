@@ -150,7 +150,15 @@ function createWindow() {
 
 ipcMain.handle("GET_PRINTERS", async () => {
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
-        return getPrintersList(mainWindow.webContents);
+        const printers = await getPrintersList(mainWindow.webContents);
+        // Return printers with status information
+        // Frontend should check status before allowing print
+        return printers.map(p => ({
+            ...p,
+            isAvailable: !String(p.status || '').toLowerCase().includes('offline') && 
+                        !String(p.status || '').toLowerCase().includes('unavailable') &&
+                        !String(p.status || '').toLowerCase().includes('error')
+        }));
     }
     return [];
 });
@@ -427,57 +435,159 @@ async function printJob(job, sendProgress = null, sendSuccess = null, sendError 
 
     async function getTargetPrinter() {
         const printers = await getPrintersList(printWindow.webContents);
-        if (printers.length === 0) throw new Error("No printers found.");
-        if (!deviceName) {
-            const def = printers.find((p) => p.isDefault) || printers[0];
-            return def ? def.name : null;
+        if (printers.length === 0) {
+            throw new Error("No printers found. Please connect a printer and try again.");
         }
-        const found = printers.some((p) => p.name === deviceName);
-        if (!found) throw new Error(`Printer "${deviceName}" not found.`);
-        return deviceName;
+        
+        // Filter out offline/unavailable printers
+        const availablePrinters = printers.filter(p => {
+            // Check if printer status indicates it's available
+            // Status can be: 'idle', 'printing', 'stopped', 'offline', etc.
+            const status = String(p.status || '').toLowerCase();
+            const isOffline = status.includes('offline') || status.includes('unavailable') || status.includes('error');
+            return !isOffline;
+        });
+        
+        if (availablePrinters.length === 0) {
+            throw new Error("No printers are currently available. Please check that your printer is connected, powered on, and online.");
+        }
+        
+        let targetPrinter = null;
+        
+        if (!deviceName) {
+            // Find default printer from available printers
+            const def = availablePrinters.find((p) => p.isDefault) || availablePrinters[0];
+            if (!def) {
+                throw new Error("No default printer found. Please select a printer.");
+            }
+            targetPrinter = def.name;
+        } else {
+            // Find the specified printer in available printers
+            const found = availablePrinters.find((p) => p.name === deviceName);
+            if (!found) {
+                // Check if printer exists but is offline
+                const existsButOffline = printers.some((p) => p.name === deviceName);
+                if (existsButOffline) {
+                    throw new Error(`Printer "${deviceName}" is offline or unavailable. Please check the printer connection and try again.`);
+                }
+                throw new Error(`Printer "${deviceName}" not found. Please select a different printer.`);
+            }
+            targetPrinter = deviceName;
+        }
+        
+        // Double-check the printer is still available (status might have changed)
+        const finalCheck = printers.find((p) => p.name === targetPrinter);
+        if (finalCheck) {
+            const status = String(finalCheck.status || '').toLowerCase();
+            if (status.includes('offline') || status.includes('unavailable') || status.includes('error')) {
+                throw new Error(`Printer "${targetPrinter}" is currently offline or unavailable. Please check the printer and try again.`);
+            }
+        }
+        
+        console.log(`Selected printer: ${targetPrinter} (status: ${finalCheck?.status || 'unknown'})`);
+        return targetPrinter;
     }
 
     function doPrint(contents, opts, fileIndex = -1) {
         return new Promise((resolve, reject) => {
-            contents.print(opts, (success, reason) => {
-                if (success) {
-                    resolve();
-                } else {
-                    // Parse common printer error messages
-                    const errorMessage = reason || "Print failed";
-                    let errorType = 'printer_error';
-                    let userFriendlyMessage = errorMessage;
-
-                    // Check for common printer errors
-                    const lowerReason = String(errorMessage).toLowerCase();
-                    if (lowerReason.includes('paper') || lowerReason.includes('sheet') || lowerReason.includes('out of paper')) {
-                        errorType = 'no_paper';
-                        userFriendlyMessage = 'No paper/sheets present in the printer. Please add paper and try again.';
-                    } else if (lowerReason.includes('ink') || lowerReason.includes('toner') || lowerReason.includes('cartridge')) {
-                        errorType = 'no_ink';
-                        userFriendlyMessage = 'Printer ink/toner is low or empty. Please check your printer.';
-                    } else if (lowerReason.includes('offline') || lowerReason.includes('not connected')) {
-                        errorType = 'printer_offline';
-                        userFriendlyMessage = 'Printer is offline or not connected. Please check the printer connection.';
-                    } else if (lowerReason.includes('jam') || lowerReason.includes('jammed')) {
-                        errorType = 'paper_jam';
-                        userFriendlyMessage = 'Paper jam detected. Please clear the paper jam and try again.';
-                    } else if (lowerReason.includes('cover') || lowerReason.includes('open')) {
-                        errorType = 'printer_cover_open';
-                        userFriendlyMessage = 'Printer cover is open. Please close the cover and try again.';
+            // Verify printer is still available before printing
+            getPrintersList(contents).then(printers => {
+                const printerName = opts.deviceName;
+                if (printerName) {
+                    const printer = printers.find(p => p.name === printerName);
+                    if (printer) {
+                        const status = String(printer.status || '').toLowerCase();
+                        if (status.includes('offline') || status.includes('unavailable') || status.includes('error')) {
+                            const error = new Error(`Printer "${printerName}" is offline or unavailable. Please check the printer connection and try again.`);
+                            error.errorType = 'printer_offline';
+                            error.fileIndex = fileIndex;
+                            return reject(error);
+                        }
+                    } else {
+                        const error = new Error(`Printer "${printerName}" not found. Please check the printer connection.`);
+                        error.errorType = 'printer_not_found';
+                        error.fileIndex = fileIndex;
+                        return reject(error);
                     }
-
-                    const error = new Error(userFriendlyMessage);
-                    error.errorType = errorType;
-                    error.originalReason = reason;
-                    error.fileIndex = fileIndex;
-                    reject(error);
                 }
+                
+                // Proceed with printing
+                contents.print(opts, (success, reason) => {
+                    if (success) {
+                        // Verify print actually succeeded by checking printer status again
+                        getPrintersList(contents).then(printers => {
+                            if (printerName) {
+                                const printer = printers.find(p => p.name === printerName);
+                                if (printer) {
+                                    const status = String(printer.status || '').toLowerCase();
+                                    if (status.includes('offline') || status.includes('unavailable')) {
+                                        console.warn(`Warning: Printer "${printerName}" status indicates offline after print, but print reported success.`);
+                                    }
+                                }
+                            }
+                            resolve();
+                        }).catch(() => {
+                            // If we can't verify, still resolve (print reported success)
+                            resolve();
+                        });
+                    } else {
+                        // Parse common printer error messages
+                        const errorMessage = reason || "Print failed";
+                        let errorType = 'printer_error';
+                        let userFriendlyMessage = errorMessage;
+
+                        // Check for common printer errors
+                        const lowerReason = String(errorMessage).toLowerCase();
+                        if (lowerReason.includes('paper') || lowerReason.includes('sheet') || lowerReason.includes('out of paper')) {
+                            errorType = 'no_paper';
+                            userFriendlyMessage = 'No paper/sheets present in the printer. Please add paper and try again.';
+                        } else if (lowerReason.includes('ink') || lowerReason.includes('toner') || lowerReason.includes('cartridge')) {
+                            errorType = 'no_ink';
+                            userFriendlyMessage = 'Printer ink/toner is low or empty. Please check your printer.';
+                        } else if (lowerReason.includes('offline') || lowerReason.includes('not connected') || lowerReason.includes('unavailable')) {
+                            errorType = 'printer_offline';
+                            userFriendlyMessage = 'Printer is offline or not connected. Please check the printer connection and try again.';
+                        } else if (lowerReason.includes('jam') || lowerReason.includes('jammed')) {
+                            errorType = 'paper_jam';
+                            userFriendlyMessage = 'Paper jam detected. Please clear the paper jam and try again.';
+                        } else if (lowerReason.includes('cover') || lowerReason.includes('open')) {
+                            errorType = 'printer_cover_open';
+                            userFriendlyMessage = 'Printer cover is open. Please close the cover and try again.';
+                        }
+
+                        const error = new Error(userFriendlyMessage);
+                        error.errorType = errorType;
+                        error.originalReason = reason;
+                        error.fileIndex = fileIndex;
+                        reject(error);
+                    }
+                });
+            }).catch(err => {
+                const error = new Error(`Failed to verify printer status: ${err.message}`);
+                error.errorType = 'printer_verification_failed';
+                error.fileIndex = fileIndex;
+                reject(error);
             });
         });
     }
 
     try {
+        // First, verify printers are available before starting
+        const initialPrinters = await getPrintersList(printWindow.webContents);
+        if (initialPrinters.length === 0) {
+            throw new Error("No printers found. Please connect a printer and try again.");
+        }
+        
+        const availablePrinters = initialPrinters.filter(p => {
+            const status = String(p.status || '').toLowerCase();
+            return !status.includes('offline') && !status.includes('unavailable') && !status.includes('error');
+        });
+        
+        if (availablePrinters.length === 0) {
+            throw new Error("No printers are currently available. Please check that your printer is connected, powered on, and online.");
+        }
+        
+        // Get the target printer (this will also validate it's available)
         const targetPrinter = await getTargetPrinter();
 
         // Files are already expanded by quantity, so print each file once
@@ -694,8 +804,32 @@ async function printJob(job, sendProgress = null, sendSuccess = null, sendError 
             }
         }
 
-        // All files printed successfully - send success callback
-        console.log('All files printed successfully, sending success callback...');
+        // Verify printer is still available before marking as completed
+        console.log('All files printed successfully, verifying printer status before sending success callback...');
+        const finalPrinters = await getPrintersList(printWindow.webContents);
+        const finalPrinterCheck = finalPrinters.find((p) => p.name === targetPrinter);
+        
+        if (!finalPrinterCheck) {
+            const error = new Error(`Printer "${targetPrinter}" is no longer available. Print job may not have completed successfully.`);
+            error.errorType = 'printer_unavailable';
+            if (sendError) {
+                sendError(error);
+            }
+            throw error;
+        }
+        
+        const finalStatus = String(finalPrinterCheck.status || '').toLowerCase();
+        if (finalStatus.includes('offline') || finalStatus.includes('unavailable') || finalStatus.includes('error')) {
+            const error = new Error(`Printer "${targetPrinter}" is offline or unavailable. Print job may not have completed successfully.`);
+            error.errorType = 'printer_offline';
+            if (sendError) {
+                sendError(error);
+            }
+            throw error;
+        }
+        
+        // All files printed successfully and printer is confirmed available - send success callback
+        console.log('Printer status verified, sending success callback...');
         if (sendSuccess) {
             sendSuccess({
                 totalFiles: totalFiles,
